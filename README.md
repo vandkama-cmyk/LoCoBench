@@ -127,10 +127,9 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📜 License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE.txt) file for details.
 
 ## 🙏 Acknowledgments
 
 - Salesforce AI Research for supporting this research
-- The open-source community for various tools and libraries used in this project
 
