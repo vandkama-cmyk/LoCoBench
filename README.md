@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![arXiv](https://img.shields.io/badge/arXiv-2024.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2024.XXXXX)
+[![arXiv](https://img.shields.io/badge/arXiv-2509.09614-b31b1b.svg)](https://arxiv.org/abs/2509.09614)
 
 **LoCoBench** is a comprehensive benchmark specifically designed to evaluate long-context Large Language Models (LLMs) in complex software development scenarios. It provides 8,000 evaluation scenarios across 10 programming languages with context lengths spanning 10K to 1M tokens.
 
@@ -25,6 +25,22 @@ pip install -r requirements.txt
 
 # Install LoCoBench package
 pip install -e .
+```
+
+### Download Evaluation Data
+
+Download the complete evaluation dataset (data.zip):
+
+```bash
+# Download data.zip from Google Drive
+# Visit: https://drive.google.com/file/d/1pK1M1sRrVZUDMKYcwh49CdXug0UzStvl/view?usp=sharing
+# Or use gdown (install with: pip install gdown)
+gdown https://drive.google.com/uc?id=1pK1M1sRrVZUDMKYcwh49CdXug0UzStvl
+
+# Extract the data
+unzip data.zip
+
+# This will create the data/ directory with all evaluation scenarios
 ```
 
 ### Environment Setup
@@ -114,9 +130,9 @@ The unified score (0-5 scale) combines 17 metrics across 4 dimensions:
 
 ```bibtex
 @article{locobench2024,
-  title={LoCoBench: A Benchmark for Evaluating Long-Context LLMs in Complex Software Development Tasks},
-  author={Qiu, Jielin and others},
-  journal={arXiv preprint arXiv:2025.XXXXX},
+  title={LoCoBench: A Benchmark for Long-Context Large Language Models in Complex Software Engineering},
+  author={Qiu, Jielin and Liu, Zuxin and Liu, Zhiwei and Murthy, Rithesh and Zhang, Jianguo and Chen, Haolin and Wang, Shiyu and Zhu, Ming and Yang, Liangwei and Tan, Juntao and Cen, Zhepeng and Qian, Cheng and Heinecke, Shelby and Yao, Weiran and Savarese, Silvio and Xiong, Caiming and Wang, Huan},
+  journal={arXiv preprint arXiv:2509.09614},
   year={2025}
 }
 ```
@@ -127,9 +143,10 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📜 License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE.txt) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
 - Salesforce AI Research for supporting this research
+- The open-source community for various tools and libraries used in this project
 
