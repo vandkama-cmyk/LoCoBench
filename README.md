@@ -67,7 +67,7 @@ source api.sh
 
 ### Option 1: Quick Evaluation (Recommended)
 
-Run evaluation on pre-generated scenarios:
+Run evaluation on all LoCoBench scenarios:
 
 ```bash
 # Evaluate a single model on all scenarios
@@ -97,8 +97,7 @@ Results are saved in `evaluation_results/` directory:
 ```
 evaluation_results/
 ├── gpt4o_evaluation_results.json          # Detailed results
-├── gpt4o_evaluation_results_summary.md    # Human-readable summary
-└── all_model_results.csv                  # Comparative analysis
+└── gpt4o_evaluation_results_summary.md    # Human-readable summary
 ```
 
 ## 📈 Understanding Results
