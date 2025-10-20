@@ -14,6 +14,8 @@ from rich.console import Console
 from ..core.task import TaskCategory, DifficultyLevel
 from ..core.config import Config
 from .synthetic_generator import MultiLLMGenerator
+from ..utils.rag import TfidfRetriever, RAGClient
+from ..utils.custom_model_adapter import CustomHTTPModelAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -794,11 +796,21 @@ class ScenarioGenerator:
         
         try:
             console.print(f"           🤖 Calling LLM for {task_category.value}...")
-            response = await self.llm_generator.generate_with_model(
-                self.llm_generator.generators["scenarios"],
-                prompt,
-                system_prompt
-            )
+            # If a custom model endpoint is configured, use RAG with that adapter
+            import os
+            custom_url = os.getenv('CUSTOM_MODEL_URL')
+            if custom_url:
+                # Build a retriever over the selected context files
+                retriever = TfidfRetriever(context_files)
+                adapter = CustomHTTPModelAdapter(url=custom_url)
+                rag = RAGClient(retriever, adapter, max_context_chars=200000)
+                response = await rag.generate(prompt, query=task_category.value, top_k=6)
+            else:
+                response = await self.llm_generator.generate_with_model(
+                    self.llm_generator.generators["scenarios"],
+                    prompt,
+                    system_prompt
+                )
             
             console.print(f"           📝 LLM response length: {len(response)} chars")
             logger.info(f"Raw LLM response for {scenario_id}: {response[:200]}...")
