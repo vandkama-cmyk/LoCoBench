@@ -6,8 +6,6 @@ from typing import Optional, List
 import logging
 import asyncio
 
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-
 from .rag import ModelAdapterInterface, RetrievedPassage
 
 logger = logging.getLogger(__name__)
@@ -22,8 +20,48 @@ class HFLocalAdapter(ModelAdapterInterface):
         # Hugging Face auth token (string) or bool True to read from env HUGGINGFACE_TOKEN
         # If None, no auth token is passed.
         if use_auth_token is True:
+            # try to read token from environment; if not present, attempt to load .env (optional)
             import os
-            self.use_auth_token = os.getenv('HUGGINGFACE_TOKEN') or os.getenv('HUGGINGFACE_HUB_TOKEN')
+            token = os.getenv('HUGGINGFACE_TOKEN') or os.getenv('HUGGINGFACE_HUB_TOKEN')
+            if not token:
+                # Try to load from a .env file in project root if python-dotenv is available
+                try:
+                    from pathlib import Path
+                    from dotenv import load_dotenv
+
+                    # project root assumed two levels up from this file
+                    project_root = Path(__file__).resolve().parents[2]
+                    env_path = project_root / '.env'
+                    if env_path.exists():
+                        load_dotenv(dotenv_path=env_path)
+                        token = os.getenv('HUGGINGFACE_TOKEN') or os.getenv('HUGGINGFACE_HUB_TOKEN')
+                        logger.info('Loaded HUGGINGFACE token from .env')
+                except Exception:
+                    # python-dotenv not installed or .env not present - ignore
+                    logger.debug('python-dotenv not available or .env not found; attempting manual .env parse')
+                    try:
+                        # manual parse of .env
+                        from pathlib import Path
+                        project_root = Path(__file__).resolve().parents[2]
+                        env_path = project_root / '.env'
+                        if env_path.exists():
+                            with open(env_path, 'r', encoding='utf-8') as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line or line.startswith('#'):
+                                        continue
+                                    if '=' in line:
+                                        k, v = line.split('=', 1)
+                                        k = k.strip()
+                                        v = v.strip().strip('"')
+                                        if k in ('HUGGINGFACE_TOKEN', 'HUGGINGFACE_HUB_TOKEN'):
+                                            token = v
+                                            logger.info('Loaded HUGGINGFACE token from .env (manual parse)')
+                                            break
+                    except Exception:
+                        logger.debug('Manual .env parse failed or .env not present')
+
+            self.use_auth_token = token
         else:
             self.use_auth_token = use_auth_token
 
@@ -31,6 +69,9 @@ class HFLocalAdapter(ModelAdapterInterface):
         if self._pipe is None:
             # Use seq2seq pipeline for T5-like models
             try:
+                # Import heavy HF libs lazily to avoid module import-time failures
+                from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+
                 # Pass auth token if available (may be required for private models)
                 if self.use_auth_token:
                     model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name, use_auth_token=self.use_auth_token)

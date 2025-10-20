@@ -24,11 +24,19 @@ try:
 except Exception:
     # fallback to TfidfRetriever if EmbeddingRetriever not available
     from locobench.utils.rag import TfidfRetriever
+    try:
+        from locobench.utils.local_embedding_adapter import LocalEmbeddingModel
+    except Exception:
+        LocalEmbeddingModel = None
 
 try:
     from locobench.utils.hf_model_adapter import HFLocalAdapter
 except Exception:
     HFLocalAdapter = None
+try:
+    from locobench.utils.hf_inference_adapter import HFInferenceAdapter
+except Exception:
+    HFInferenceAdapter = None
 
 
 class MockAdapter:
@@ -46,19 +54,67 @@ async def main():
 
     # Try embedding retriever first; fall back to TF-IDF if sentence-transformers not installed or fails
     try:
-        retriever = EmbeddingRetriever(project_files, model_name='all-MiniLM-L6-v2')
+        # if user provided LOCAL_EMBED_MODEL env var, use LocalEmbeddingModel
+        import os
+        local_model_path = os.environ.get('LOCAL_EMBED_MODEL')
+        if local_model_path and LocalEmbeddingModel is not None:
+            model_instance = LocalEmbeddingModel(model_name_or_path=local_model_path)
+            retriever = EmbeddingRetriever(project_files, model=model_instance)
+        else:
+            retriever = EmbeddingRetriever(project_files, model_name='all-MiniLM-L6-v2')
     except Exception as e:
         print('EmbeddingRetriever not available or failed:', e)
         retriever = TfidfRetriever(project_files)
 
-    # Try to use HFLocalAdapter if available; otherwise use MockAdapter
+    # Try to use HFLocalAdapter if available; otherwise fallback to HFInferenceAdapter or MockAdapter
+    adapter = None
+    # Prefer the lightweight Inference API adapter to avoid importing heavy local libs
+    if HFInferenceAdapter is not None:
+        # Try a small set of public models/tasks and pick the first that responds
+        candidate_models = [
+            ('distilgpt2', 'text-generation'),
+            ('gpt2', 'text-generation'),
+            ('sshleifer/distilbart-cnn-12-6', 'summarization')
+        ]
+        for mid, task in candidate_models:
+            try:
+                cand = HFInferenceAdapter(model=mid, use_auth_token=True, task=task)
+                # quick health check
+                try:
+                    # perform a health check by making a simple inference call
+                    resp = cand.generate('Hello world')
+                    continue
+                except Exception as e:
+                    print(f'model {mid} failed check: {e}')
+                    continue
+                print('Using HFInferenceAdapter with model', mid, 'task', task)
+                adapter = cand
+                break
+            except Exception as e:
+                print('HFInferenceAdapter init failed for', mid, e)
+                adapter = None
+
+    # Optionally use local HF if explicitly requested and imports look safe
+    use_local = False
     try:
-        if HFLocalAdapter is not None:
+        import os
+        use_local = os.environ.get('USE_LOCAL_HF', '') == '1'
+    except Exception:
+        use_local = False
+
+    if adapter is None and use_local and HFLocalAdapter is not None:
+        try:
+            # quick import check for transformers to avoid raising heavy import errors
+            import importlib
+            importlib.import_module('transformers')
             adapter = HFLocalAdapter(model_name='google/flan-t5-small', use_auth_token=True)
-        else:
-            raise RuntimeError('HFLocalAdapter not available')
-    except Exception as e:
-        print('HFLocalAdapter not available or failed:', e)
+            print('Using HFLocalAdapter (local transformers)')
+        except Exception as e:
+            print('HFLocalAdapter not available or unsafe to import:', e)
+            adapter = None
+
+    if adapter is None:
+        print('Falling back to MockAdapter for generation')
         adapter = MockAdapter()
     rag = RAGClient(retriever, adapter, max_context_chars=20000)
 

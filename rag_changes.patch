@@ -1,0 +1,526 @@
+diff --git a/locobench/__init__.py b/locobench/__init__.py
+index 3f1cab2..1144fcf 100644
+--- a/locobench/__init__.py
++++ b/locobench/__init__.py
+@@ -11,9 +11,17 @@ __author__ = "LoCoBench Team"
+ 
+ from .core import *
+ from .analysis import *
+-from .generation import *
+ from .evaluation import *
+ 
++# generation imports may require heavy optional dependencies (openai, google genai, etc.).
++# Import lazily and fail gracefully so light-weight utilities (e.g. utils.rag) can be used
++# without installing all provider SDKs.
++try:
++    from .generation import *
++except Exception as e:  # pragma: no cover - best-effort graceful import
++    import warnings
++    warnings.warn(f"Could not import locobench.generation (optional): {e}")
++
+ __all__ = [
+     "__version__",
+     "__author__",
+diff --git a/locobench/evaluation/__init__.py b/locobench/evaluation/__init__.py
+index 06e72fa..a3843bc 100644
+--- a/locobench/evaluation/__init__.py
++++ b/locobench/evaluation/__init__.py
+@@ -2,8 +2,11 @@
+ Evaluation utilities for LoCoBench
+ """
+ 
+-from .evaluator import LoCoBenchEvaluator
+-
+-__all__ = [
+-    "LoCoBenchEvaluator"
+-] 
+\ No newline at end of file
++try:
++    from .evaluator import LoCoBenchEvaluator
++    __all__ = [
++        "LoCoBenchEvaluator"
++    ]
++except Exception:  # pragma: no cover - optional import
++    # If evaluator requires heavy optional deps, allow package to be imported without it.
++    __all__ = []
+\ No newline at end of file
+diff --git a/locobench/generation/scenario_generator.py b/locobench/generation/scenario_generator.py
+index 3f5338e..b658294 100644
+--- a/locobench/generation/scenario_generator.py
++++ b/locobench/generation/scenario_generator.py
+@@ -14,6 +14,8 @@ from rich.console import Console
+ from ..core.task import TaskCategory, DifficultyLevel
+ from ..core.config import Config
+ from .synthetic_generator import MultiLLMGenerator
++from ..utils.rag import TfidfRetriever, RAGClient
++from ..utils.custom_model_adapter import CustomHTTPModelAdapter
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -794,11 +796,21 @@ class ScenarioGenerator:
+         
+         try:
+             console.print(f"           🤖 Calling LLM for {task_category.value}...")
+-            response = await self.llm_generator.generate_with_model(
+-                self.llm_generator.generators["scenarios"],
+-                prompt,
+-                system_prompt
+-            )
++            # If a custom model endpoint is configured, use RAG with that adapter
++            import os
++            custom_url = os.getenv('CUSTOM_MODEL_URL')
++            if custom_url:
++                # Build a retriever over the selected context files
++                retriever = TfidfRetriever(context_files)
++                adapter = CustomHTTPModelAdapter(url=custom_url)
++                rag = RAGClient(retriever, adapter, max_context_chars=200000)
++                response = await rag.generate(prompt, query=task_category.value, top_k=6)
++            else:
++                response = await self.llm_generator.generate_with_model(
++                    self.llm_generator.generators["scenarios"],
++                    prompt,
++                    system_prompt
++                )
+             
+             console.print(f"           📝 LLM response length: {len(response)} chars")
+             logger.info(f"Raw LLM response for {scenario_id}: {response[:200]}...")
+diff --git a/locobench/utils/custom_model_adapter.py b/locobench/utils/custom_model_adapter.py
+new file mode 100644
+index 0000000..d41d3fc
+--- /dev/null
++++ b/locobench/utils/custom_model_adapter.py
+@@ -0,0 +1,42 @@
++"""
++Adapter for a custom model served via HTTP. Keeps auth and request details configurable via environment or passed arguments.
++
++This adapter implements the ModelAdapterInterface expected by RAGClient.
++It sends JSON {"prompt": "..."} to the configured endpoint and expects a text response.
++"""
++import os
++import aiohttp
++import logging
++from typing import List, Optional
++from .rag import ModelAdapterInterface, RetrievedPassage
++
++logger = logging.getLogger(__name__)
++
++
++class CustomHTTPModelAdapter(ModelAdapterInterface):
++    def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None, timeout: int = 60):
++        self.url = url or os.getenv('CUSTOM_MODEL_URL')
++        self.api_key = api_key or os.getenv('CUSTOM_MODEL_API_KEY')
++        self.timeout = timeout
++        if not self.url:
++            raise ValueError("Custom model URL not provided. Set CUSTOM_MODEL_URL or pass url param.")
++
++    async def generate(self, prompt: str, context: Optional[List[RetrievedPassage]] = None) -> str:
++        headers = {
++            'Content-Type': 'application/json'
++        }
++        if self.api_key:
++            headers['Authorization'] = f"Bearer {self.api_key}"
++
++        payload = {
++            'prompt': prompt,
++            'max_tokens': 2000
++        }
++
++        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
++            async with session.post(self.url, json=payload, headers=headers) as resp:
++                text = await resp.text()
++                if resp.status >= 400:
++                    logger.error("Custom model adapter received error status %s: %s", resp.status, text[:500])
++                    raise RuntimeError(f"Custom model request failed: {resp.status} - {text[:200]}")
++                return text
+\ No newline at end of file
+diff --git a/locobench/utils/hf_model_adapter.py b/locobench/utils/hf_model_adapter.py
+new file mode 100644
+index 0000000..6a8949c
+--- /dev/null
++++ b/locobench/utils/hf_model_adapter.py
+@@ -0,0 +1,60 @@
++"""
++Adapter to use a small HuggingFace model (transformers pipeline) for generation.
++This is intended for local testing with small models (e.g., google/flan-t5-small) and not optimized for large-scale production.
++"""
++from typing import Optional, List
++import logging
++import asyncio
++
++from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
++
++from .rag import ModelAdapterInterface, RetrievedPassage
++
++logger = logging.getLogger(__name__)
++
++
++class HFLocalAdapter(ModelAdapterInterface):
++    def __init__(self, model_name: str = 'google/flan-t5-small', device: Optional[int] = None, use_auth_token: Optional[str] = None):
++        # device: -1 cpu, 0+ for GPU index
++        self.model_name = model_name
++        self.device = device if device is not None else -1
++        self._pipe = None
++        # Hugging Face auth token (string) or bool True to read from env HUGGINGFACE_TOKEN
++        # If None, no auth token is passed.
++        if use_auth_token is True:
++            import os
++            self.use_auth_token = os.getenv('HUGGINGFACE_TOKEN') or os.getenv('HUGGINGFACE_HUB_TOKEN')
++        else:
++            self.use_auth_token = use_auth_token
++
++    def _ensure_pipe(self):
++        if self._pipe is None:
++            # Use seq2seq pipeline for T5-like models
++            try:
++                # Pass auth token if available (may be required for private models)
++                if self.use_auth_token:
++                    model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name, use_auth_token=self.use_auth_token)
++                    tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_auth_token=self.use_auth_token)
++                else:
++                    model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
++                    tokenizer = AutoTokenizer.from_pretrained(self.model_name)
++                self._pipe = pipeline('text2text-generation', model=model, tokenizer=tokenizer, device=self.device)
++            except Exception as e:
++                logger.error('Failed to load HF model %s: %s', self.model_name, e)
++                raise
++
++    async def generate(self, prompt: str, context: Optional[List[RetrievedPassage]] = None) -> str:
++        # Ensure model pipeline is loaded (blocking load kept minimal)
++        loop = asyncio.get_event_loop()
++        await loop.run_in_executor(None, self._ensure_pipe)
++
++        # Compose prompt (already includes RETRIEVED_CONTEXT when called from RAGClient)
++        # For safety, we may truncate prompt if huge
++        input_text = prompt if len(prompt) < 20000 else prompt[-20000:]
++
++        # Use small generation params for speed
++        out = await loop.run_in_executor(None, lambda: self._pipe(input_text, max_length=512, do_sample=False))
++        if out and isinstance(out, list):
++            return out[0].get('generated_text', '')
++        return str(out)
++ 
+\ No newline at end of file
+diff --git a/locobench/utils/rag.py b/locobench/utils/rag.py
+new file mode 100644
+index 0000000..ec89a51
+--- /dev/null
++++ b/locobench/utils/rag.py
+@@ -0,0 +1,224 @@
++"""
++Lightweight Retrieval-Augmented Generation (RAG) utilities.
++- TF-IDF retriever over project files
++- RAGClient that combines retrieved passages with a model adapter
++- Simple interfaces so custom adapters can be plugged in
++
++Designed to be dependency-minimal. Uses scikit-learn for TF-IDF.
++"""
++from typing import List, Dict, Tuple, Optional, Any
++from dataclasses import dataclass
++import logging
++import math
++
++try:
++    from sklearn.feature_extraction.text import TfidfVectorizer
++    SKLEARN_AVAILABLE = True
++except Exception:
++    TfidfVectorizer = None
++    SKLEARN_AVAILABLE = False
++
++try:
++    # optional embedding retriever
++    from sentence_transformers import SentenceTransformer
++    import numpy as np
++except Exception:
++    SentenceTransformer = None
++    np = None
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class RetrievedPassage:
++    file_path: str
++    content: str
++    score: float
++
++
++class TfidfRetriever:
++    """Simple TF-IDF retriever over an in-memory dict of file_path->content."""
++    def __init__(self, documents: Dict[str, str], ngram_range=(1, 2)):
++        self.docs = documents or {}
++        self.file_paths = list(self.docs.keys())
++        self.corpus = [self.docs[p] for p in self.file_paths]
++        # If sklearn is available, use it; otherwise fallback to simple python implementation
++        self.vectorizer = None
++        self.doc_vectors = None
++        if SKLEARN_AVAILABLE and self.corpus:
++            try:
++                self.vectorizer = TfidfVectorizer(ngram_range=ngram_range, max_features=20000)
++                self.doc_vectors = self.vectorizer.fit_transform(self.corpus)
++                logger.info("TfidfRetriever (sklearn) initialized with %d documents", len(self.corpus))
++            except Exception as e:
++                logger.warning("Failed to initialize sklearn TfidfRetriever: %s", e)
++                self.vectorizer = None
++                self.doc_vectors = None
++        else:
++            # simple python fallback: precompute token sets and term frequencies
++            self._tf_docs = []
++            self._vocab = {}
++            for doc in self.corpus:
++                tokens = [t.lower() for t in _simple_tokenize(doc)]
++                tf = {}
++                for t in tokens:
++                    tf[t] = tf.get(t, 0) + 1
++                    if t not in self._vocab:
++                        self._vocab[t] = len(self._vocab)
++                self._tf_docs.append((tf, len(tokens)))
++            logger.info("TfidfRetriever (python fallback) initialized with %d documents, vocab=%d", len(self.corpus), len(self._vocab))
++
++    def retrieve(self, query: str, top_k: int = 5) -> List[RetrievedPassage]:
++        """Return top_k passages most relevant to query."""
++        if not self.corpus or not query:
++            return []
++
++        if SKLEARN_AVAILABLE and self.vectorizer is not None and self.doc_vectors is not None:
++            try:
++                qv = self.vectorizer.transform([query])
++                # compute cosine similarity
++                import numpy as _np
++                scores = (self.doc_vectors @ qv.T).toarray().ravel()
++                ranked_idx = list(reversed(scores.argsort()))
++                results: List[RetrievedPassage] = []
++                for idx in ranked_idx[:top_k]:
++                    score = float(scores[idx])
++                    results.append(RetrievedPassage(self.file_paths[idx], self.corpus[idx], score))
++                return results
++            except Exception as e:
++                logger.warning("TF-IDF (sklearn) retrieval failed: %s", e)
++                return []
++        else:
++            # Simple python TF-IDF-like scoring: cosine between TF vectors (no idf)
++            q_tokens = [t.lower() for t in _simple_tokenize(query)]
++            q_tf = {}
++            for t in q_tokens:
++                q_tf[t] = q_tf.get(t, 0) + 1
++
++            scores = []
++            for i, (doc_tf, doc_len) in enumerate(self._tf_docs):
++                # dot product
++                dot = 0.0
++                for t, v in q_tf.items():
++                    dot += v * doc_tf.get(t, 0)
++                # norm
++                q_norm = math.sqrt(sum(v*v for v in q_tf.values()))
++                d_norm = math.sqrt(sum(v*v for v in doc_tf.values()))
++                sim = dot / (q_norm * d_norm + 1e-12)
++                scores.append((i, sim))
++
++            scores.sort(key=lambda x: x[1], reverse=True)
++            results: List[RetrievedPassage] = []
++            for idx, score in scores[:top_k]:
++                results.append(RetrievedPassage(self.file_paths[idx], self.corpus[idx], float(score)))
++            return results
++
++
++def _simple_tokenize(text: str):
++    # very small tokenizer: split on non-alphanumeric
++    import re
++    return [t for t in re.split(r"[^A-Za-z0-9_]+", text) if t]
++
++
++class EmbeddingRetriever:
++    """Retriever based on sentence-transformers embeddings.
++
++    Pass a dict file_path->content and a sentence-transformer model name or instance.
++    """
++
++    def __init__(self, documents: Dict[str, str], model: Optional[Any] = None, model_name: str = 'all-mpnet-base-v2'):
++        if SentenceTransformer is None:
++            raise RuntimeError('sentence-transformers not available; install sentence-transformers')
++
++        self.docs = documents or {}
++        self.file_paths = list(self.docs.keys())
++        self.corpus = [self.docs[p] for p in self.file_paths]
++        # load or use provided model
++        if model is not None:
++            self.model = model
++        else:
++            self.model = SentenceTransformer(model_name)
++
++        # compute embeddings
++        try:
++            self.embeddings = np.array(self.model.encode(self.corpus, show_progress_bar=False))
++        except Exception as e:
++            logger.warning('Failed to compute embeddings: %s', e)
++            self.embeddings = None
++
++    def retrieve(self, query: str, top_k: int = 5) -> List[RetrievedPassage]:
++        if not self.corpus or self.embeddings is None:
++            return []
++
++        q_emb = np.array(self.model.encode([query], show_progress_bar=False))[0]
++        # cosine similarities
++        sims = (self.embeddings @ q_emb) / (np.linalg.norm(self.embeddings, axis=1) * (np.linalg.norm(q_emb) + 1e-12))
++        ranked_idx = list(reversed(sims.argsort()))
++        results: List[RetrievedPassage] = []
++        for idx in ranked_idx[:top_k]:
++            score = float(sims[idx])
++            results.append(RetrievedPassage(self.file_paths[idx], self.corpus[idx], score))
++        return results
++
++
++class ModelAdapterInterface:
++    """Interface that model adapters should implement."""
++
++    async def generate(self, prompt: str, context: Optional[List[RetrievedPassage]] = None) -> str:
++        """Generate text given a prompt and optional retrieved context. Must be async."""
++        raise NotImplementedError()
++
++
++class RAGClient:
++    """Retrieval-Augmented Generation client.
++
++    Usage:
++      retriever = TfidfRetriever(project_files)
++      adapter = CustomAdapter(...)  # implements ModelAdapterInterface
++      rag = RAGClient(retriever, adapter)
++      output = await rag.generate(prompt)
++    """
++
++    def __init__(self, retriever: TfidfRetriever, adapter: ModelAdapterInterface, max_context_chars: int = 100000):
++        self.retriever = retriever
++        self.adapter = adapter
++        self.max_context_chars = max_context_chars
++
++    async def generate(self, prompt: str, query: Optional[str] = None, top_k: int = 5) -> str:
++        # If user supplies a query for retrieval use it, otherwise use full prompt
++        query_text = query or prompt
++        retrieved = self.retriever.retrieve(query_text, top_k=top_k)
++
++        # Truncate aggregated context to max_context_chars (simple heuristic)
++        context_bundle: List[RetrievedPassage] = []
++        total_chars = 0
++        for p in retrieved:
++            if total_chars + len(p.content) > self.max_context_chars:
++                # Add truncated content
++                remaining = max(0, self.max_context_chars - total_chars)
++                if remaining <= 0:
++                    break
++                truncated = p.content[:remaining]
++                context_bundle.append(RetrievedPassage(p.file_path, truncated, p.score))
++                total_chars += len(truncated)
++                break
++            else:
++                context_bundle.append(p)
++                total_chars += len(p.content)
++
++        logger.info("RAG retrieved %d passages, total_chars=%d", len(context_bundle), total_chars)
++
++        # Build the augmented prompt passed to the adapter
++        context_texts = []
++        for p in context_bundle:
++            header = f"FILE: {p.file_path} | SCORE: {p.score:.4f}\n"
++            context_texts.append(header + p.content)
++
++        augmented_prompt = "\n\n--- RETRIEVED CONTEXT ---\n\n".join(context_texts)
++        if augmented_prompt:
++            full_prompt = f"{prompt}\n\nRETRIEVED_CONTEXT:\n{augmented_prompt}\n\nPlease use the retrieved context to answer the prompt in detail." 
++        else:
++            full_prompt = prompt
++
++        # Delegate to adapter
++        return await self.adapter.generate(full_prompt, context=context_bundle)
+\ No newline at end of file
+diff --git a/requirements.txt b/requirements.txt
+index 99eba87..b76cafd 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -36,6 +36,12 @@ pathspec>=0.11.0
+ aiohttp>=3.8.0
+ asyncio-throttle>=1.0.0
+ 
++# Retrieval / RAG
++scikit-learn>=1.2.0
++sentence-transformers>=2.2.2
++transformers>=4.40.0
++torch>=2.0.0
++
+ # Claude API access via Bearer Token (no additional dependencies needed)
+ 
+ # Testing and validation
+diff --git a/tools/test_rag_hf.py b/tools/test_rag_hf.py
+new file mode 100644
+index 0000000..9455d26
+--- /dev/null
++++ b/tools/test_rag_hf.py
+@@ -0,0 +1,70 @@
++"""
++Quick test script for RAG with sentence-transformers embeddings and a small HF model.
++Run after installing requirements:
++
++python tools/test_rag_hf.py
++
++It will:
++ - build an EmbeddingRetriever over a tiny in-memory project
++ - load a small HF model (google/flan-t5-small) via HFLocalAdapter
++ - run RAGClient.generate and print output
++"""
++import asyncio
++import sys
++from pathlib import Path
++
++# Ensure project root is on sys.path so `locobench` package is importable when running the script
++proj_root = Path(__file__).resolve().parents[1]
++if str(proj_root) not in sys.path:
++    sys.path.insert(0, str(proj_root))
++
++from locobench.utils.rag import RetrievedPassage, RAGClient
++try:
++    from locobench.utils.rag import EmbeddingRetriever, TfidfRetriever
++except Exception:
++    # fallback to TfidfRetriever if EmbeddingRetriever not available
++    from locobench.utils.rag import TfidfRetriever
++
++try:
++    from locobench.utils.hf_model_adapter import HFLocalAdapter
++except Exception:
++    HFLocalAdapter = None
++
++
++class MockAdapter:
++    """Simple mock adapter that returns a canned response (used when HF/custom model not available)."""
++    async def generate(self, prompt: str, context=None) -> str:
++        return "MOCK_RESPONSE: This is a mocked generation used for testing RAG flow."
++
++
++async def main():
++    project_files = {
++        "src/app.py": "def add(a, b):\n    return a + b\n\n# main app file\n",
++        "src/utils.py": "def helper(x):\n    return x * 2\n",
++        "README.md": "Sample project for RAG test: simple math utilities and an app."
++    }
++
++    # Try embedding retriever first; fall back to TF-IDF if sentence-transformers not installed or fails
++    try:
++        retriever = EmbeddingRetriever(project_files, model_name='all-MiniLM-L6-v2')
++    except Exception as e:
++        print('EmbeddingRetriever not available or failed:', e)
++        retriever = TfidfRetriever(project_files)
++
++    # Try to use HFLocalAdapter if available; otherwise use MockAdapter
++    try:
++        if HFLocalAdapter is not None:
++            adapter = HFLocalAdapter(model_name='google/flan-t5-small', use_auth_token=True)
++        else:
++            raise RuntimeError('HFLocalAdapter not available')
++    except Exception as e:
++        print('HFLocalAdapter not available or failed:', e)
++        adapter = MockAdapter()
++    rag = RAGClient(retriever, adapter, max_context_chars=20000)
++
++    prompt = "Create a task where a user must add a new feature to extend add() to support floats and update tests. Provide steps."
++    out = await rag.generate(prompt, query='feature implementation', top_k=3)
++    print('\n==== RAG OUTPUT ===\n', out)
++
++if __name__ == '__main__':
++    asyncio.run(main())
