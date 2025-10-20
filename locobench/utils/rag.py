@@ -127,21 +127,34 @@ class EmbeddingRetriever:
     """
 
     def __init__(self, documents: Dict[str, str], model: Optional[Any] = None, model_name: str = 'all-mpnet-base-v2'):
-        if SentenceTransformer is None:
-            raise RuntimeError('sentence-transformers not available; install sentence-transformers')
-
+        """documents: dict filepath->text
+        model: optional model instance with .encode(list[str]) -> array-like
+        model_name: name to load if model not provided and sentence-transformers is available
+        """
         self.docs = documents or {}
         self.file_paths = list(self.docs.keys())
         self.corpus = [self.docs[p] for p in self.file_paths]
-        # load or use provided model
+
+        # load or use provided model instance
         if model is not None:
             self.model = model
         else:
+            if SentenceTransformer is None:
+                raise RuntimeError('sentence-transformers not available; provide model instance or install sentence-transformers')
             self.model = SentenceTransformer(model_name)
 
-        # compute embeddings
+        # compute embeddings using provided model's encode
         try:
-            self.embeddings = np.array(self.model.encode(self.corpus, show_progress_bar=False))
+            embs = self.model.encode(self.corpus, show_progress_bar=False) if hasattr(self.model, 'encode') else None
+            if embs is None:
+                raise RuntimeError('Provided model does not implement encode()')
+            # allow list outputs
+            try:
+                self.embeddings = np.array(embs)
+            except Exception:
+                # try to coerce via numpy
+                import numpy as __np
+                self.embeddings = __np.asarray(embs)
         except Exception as e:
             logger.warning('Failed to compute embeddings: %s', e)
             self.embeddings = None
