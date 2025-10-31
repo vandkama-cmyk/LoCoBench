@@ -2401,6 +2401,18 @@ Generate your response now:"""
             'claude-opus-4': 'claude-opus-4',              # High capability
             'claude-sonnet-3.7': 'claude-sonnet-3.7',      # Hybrid reasoning
             
+            # === Hugging Face Models ===
+            # Code generation models
+            'deepseek-coder': 'deepseek-ai/deepseek-coder-1.3b-instruct',  # Small code model
+            'deepseek-coder-1.3b': 'deepseek-ai/deepseek-coder-1.3b-instruct',
+            'deepseek-coder-6.7b': 'deepseek-ai/deepseek-coder-6.7b-instruct',
+            'qwen-coder': 'Qwen/Qwen2.5-Coder-1.5B-Instruct',  # Small code model
+            'qwen-coder-1.5b': 'Qwen/Qwen2.5-Coder-1.5B-Instruct',
+            'qwen-coder-7b': 'Qwen/Qwen2.5-Coder-7B-Instruct',
+            'codebert': 'microsoft/CodeBERT-base',
+            'starcoder': 'bigcode/starcoder',
+            'codellama': 'codellama/CodeLlama-7b-hf',
+            
             # Note: Excluding audio/video/TTS-only models as they're not suitable for code evaluation:
             # - gpt-4o-audio-preview, gpt-4o-realtime-preview (audio focus)
             # - gpt-4o-mini-audio-preview, gpt-4o-mini-realtime-preview (audio focus)
@@ -2416,7 +2428,12 @@ Generate your response now:"""
             logger.warning(f"Model name is not a string: {type(model_name)} = {model_name}")
             model_name = str(model_name)
         
-        model_key = model_key_mapping.get(model_name.lower(), 'openai')
+        # Check if it's a Hugging Face model ID (contains /)
+        if '/' in model_name and model_name not in model_key_mapping:
+            # Treat as Hugging Face model directly
+            model_key = model_name
+        else:
+            model_key = model_key_mapping.get(model_name.lower(), 'openai')
         
         # Retry logic for empty responses
         max_retries = 3
@@ -2437,6 +2454,9 @@ Generate your response now:"""
                     response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
                     # Restore original model
                     self.llm_generator.config.api.default_model_google = original_model
+                elif '/' in model_key or model_key.startswith('huggingface:') or model_key.startswith('hf:'):
+                    # Hugging Face model - use directly
+                    response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
                 else:
                     response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
                 

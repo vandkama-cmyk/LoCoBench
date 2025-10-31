@@ -26,9 +26,17 @@ from ..core.config import Config
 from ..core.task import TaskCategory, DifficultyLevel
 from ..utils.rate_limiter import APIRateLimitManager
 
-
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Hugging Face support
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+    logger.warning("transformers/torch not available. Hugging Face models will not be available.")
 
 def setup_generation_logging(log_file: str = None) -> logging.Logger:
     """Setup structured logging for generation process"""
@@ -309,7 +317,7 @@ class MultiLLMGenerator:
         }
     
     def setup_llm_clients(self):
-        """Initialize LLM API clients (OpenAI o3 + Gemini 2.5 Pro + Claude 4 via Bearer Token)"""
+        """Initialize LLM API clients (OpenAI o3 + Gemini 2.5 Pro + Claude 4 via Bearer Token + Hugging Face)"""
         # OpenAI o3
         self.openai_client = openai.AsyncOpenAI(
             api_key=self.config.api.openai_api_key
@@ -321,7 +329,15 @@ class MultiLLMGenerator:
         # Claude Bearer Token (no additional setup needed - used directly in API calls)
         # Verification happens in generate_with_claude method
         
-        self.logger.info("✅ 3-Elite-Model generator initialized (OpenAI o3 + Gemini 2.5 Pro + Claude 4 Bearer Token)")
+        # Hugging Face models - lazy loading (loaded on first use)
+        self.hf_models = {}
+        self.hf_tokenizers = {}
+        
+        if HF_AVAILABLE:
+            self.logger.info("✅ 4-Model generator initialized (OpenAI o3 + Gemini 2.5 Pro + Claude 4 + Hugging Face)")
+        else:
+            self.logger.info("✅ 3-Elite-Model generator initialized (OpenAI o3 + Gemini 2.5 Pro + Claude 4 Bearer Token)")
+            self.logger.warning("⚠️ Hugging Face models not available (transformers/torch not installed)")
     
     async def generate_with_openai(self, prompt: str, system_prompt: str = None) -> str:
         """Generate content using OpenAI with retry logic and rate limiting"""
@@ -536,8 +552,105 @@ class MultiLLMGenerator:
         async with await self.rate_limiter.acquire("claude"):
             return await retry_with_backoff(_make_claude_call, max_retries=2, base_delay=3.0, max_delay=60.0, provider=f"Claude {model_name}")
     
+    async def generate_with_huggingface(self, model_name: str, prompt: str, system_prompt: str = None) -> str:
+        """Generate content using Hugging Face models (local inference)"""
+        if not HF_AVAILABLE:
+            raise APIError("HuggingFace", "NOT_AVAILABLE", "transformers/torch not installed. Install with: pip install transformers torch")
+        
+        async def _make_hf_call():
+            try:
+                # Lazy load model if not already loaded
+                if model_name not in self.hf_models:
+                    self.logger.info(f"📦 Loading Hugging Face model: {model_name}")
+                    
+                    # Use CPU if CUDA not available
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    
+                    # Load tokenizer
+                    try:
+                        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                    except Exception as e:
+                        # Some models may need padding token
+                        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                        if tokenizer.pad_token is None:
+                            tokenizer.pad_token = tokenizer.eos_token
+                    
+                    # Load model
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        device_map="auto" if device == "cuda" else None,
+                        low_cpu_mem_usage=True
+                    )
+                    
+                    if device == "cpu":
+                        model = model.to(device)
+                    
+                    self.hf_models[model_name] = model
+                    self.hf_tokenizers[model_name] = tokenizer
+                    self.logger.info(f"✅ Loaded Hugging Face model: {model_name} on {device}")
+                
+                model = self.hf_models[model_name]
+                tokenizer = self.hf_tokenizers[model_name]
+                device = next(model.parameters()).device
+                
+                # Prepare input text
+                if system_prompt:
+                    full_prompt = f"{system_prompt}\n\n{prompt}"
+                else:
+                    full_prompt = prompt
+                
+                self.logger.info(f"🤖 Generating with Hugging Face model: {model_name}")
+                self.logger.info(f"📝 Prompt length: {len(full_prompt)} chars")
+                
+                # Tokenize input
+                inputs = tokenizer(full_prompt, return_tensors="pt", truncation=True, max_length=2048).to(device)
+                
+                # Generate
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=2048,
+                        temperature=0.7,
+                        do_sample=True,
+                        top_p=0.9,
+                        pad_token_id=tokenizer.eos_token_id if tokenizer.pad_token_id is None else tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id
+                    )
+                
+                # Decode response
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Extract only the newly generated part (after the prompt)
+                if full_prompt in generated_text:
+                    response = generated_text.split(full_prompt, 1)[1].strip()
+                else:
+                    # If prompt is not found, return the end part (likely the generated content)
+                    response = generated_text[len(full_prompt):].strip()
+                
+                self.logger.info(f"📤 Hugging Face response length: {len(response)} chars")
+                
+                if not response or len(response.strip()) < 10:
+                    raise APIError("HuggingFace", "EMPTY_RESPONSE", f"Model {model_name} returned empty or very short response")
+                
+                return response
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                if "out of memory" in error_str or "cuda" in error_str:
+                    raise APIError("HuggingFace", "OUT_OF_MEMORY", f"GPU/CPU memory error for {model_name}: {str(e)}")
+                elif "no such file" in error_str or "not found" in error_str:
+                    raise APIError("HuggingFace", "MODEL_NOT_FOUND", f"Model {model_name} not found on Hugging Face Hub: {str(e)}")
+                else:
+                    raise APIError("HuggingFace", "GENERATION_ERROR", f"Error generating with {model_name}: {str(e)}", original_error=e)
+        
+        # Apply rate limiting (lower rate for local models)
+        async with await self.rate_limiter.acquire("huggingface"):
+            return await retry_with_backoff(_make_hf_call, max_retries=2, base_delay=1.0, max_delay=30.0, provider=f"HuggingFace {model_name}")
+    
     async def generate_with_model(self, model_type: str, prompt: str, system_prompt: str = None) -> str:
-        """Generate content with specified model type (OpenAI o3, Gemini 2.5 Pro, or Claude)"""
+        """Generate content with specified model type (OpenAI o3, Gemini 2.5 Pro, Claude, or Hugging Face)"""
         try:
             if model_type == "openai":
                 return await self.generate_with_openai(prompt, system_prompt)
@@ -549,8 +662,18 @@ class MultiLLMGenerator:
             elif model_type.startswith("claude-"):
                 # Support direct Claude model specification
                 return await self.generate_with_claude(prompt, model_type, system_prompt)
+            elif model_type.startswith("huggingface:") or model_type.startswith("hf:"):
+                # Hugging Face model: format is "huggingface:model-name" or "hf:model-name"
+                model_name = model_type.split(":", 1)[1] if ":" in model_type else model_type
+                return await self.generate_with_huggingface(model_name, prompt, system_prompt)
+            elif "/" in model_type and HF_AVAILABLE:
+                # Assume it's a Hugging Face model ID if it contains "/"
+                return await self.generate_with_huggingface(model_type, prompt, system_prompt)
             else:
-                raise ValueError(f"Unknown model type: {model_type}. Supported: 'openai', 'google', 'claude', 'claude-sonnet-4', 'claude-opus-4', 'claude-sonnet-3.7'")
+                supported = "'openai', 'google', 'claude', 'claude-sonnet-4', 'claude-opus-4', 'claude-sonnet-3.7'"
+                if HF_AVAILABLE:
+                    supported += ", 'huggingface:model-name', 'hf:model-name', or any Hugging Face model ID"
+                raise ValueError(f"Unknown model type: {model_type}. Supported: {supported}")
         except APIError as e:
             # Re-raise APIError with additional context about model assignment
             raise APIError(
