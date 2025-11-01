@@ -18,6 +18,7 @@ from enum import Enum
 import random
 
 import openai
+import httpx
 import google.generativeai as genai
 from rich.console import Console
 from rich.progress import Progress, TaskID
@@ -304,6 +305,10 @@ class MultiLLMGenerator:
         self.logger.info("🚀 MultiLLMGenerator initialized")
         
         self.rate_limiter = APIRateLimitManager(config)
+        self._openai_http_client: Optional[httpx.AsyncClient] = None
+        self._custom_http_client: Optional[httpx.AsyncClient] = None
+        self.custom_openai_client: Optional[openai.AsyncOpenAI] = None
+        self._custom_client_signature: Optional[Tuple[str, str]] = None
         self.setup_llm_clients()
         
         # Generator specialization (using 2 Elite Models)
@@ -318,10 +323,25 @@ class MultiLLMGenerator:
     
     def setup_llm_clients(self):
         """Initialize LLM API clients (OpenAI o3 + Gemini 2.5 Pro + Claude 4 via Bearer Token + Hugging Face)"""
-        # OpenAI o3
-        self.openai_client = openai.AsyncOpenAI(
-            api_key=self.config.api.openai_api_key
-        )
+        # OpenAI-compatible client (supports custom base URL & timeout)
+        openai_kwargs: Dict[str, Any] = {}
+
+        if self.config.api.openai_api_key:
+            openai_kwargs["api_key"] = self.config.api.openai_api_key
+        if self.config.api.openai_base_url:
+            openai_kwargs["base_url"] = self.config.api.openai_base_url.rstrip("/")
+        if self.config.api.openai_timeout:
+            openai_kwargs["timeout"] = self.config.api.openai_timeout
+        if self.config.api.disable_proxy:
+            if self._openai_http_client is None:
+                self._openai_http_client = httpx.AsyncClient(trust_env=False)
+            openai_kwargs["http_client"] = self._openai_http_client
+
+        self.openai_client = openai.AsyncOpenAI(**openai_kwargs)
+        if self.config.api.openai_base_url:
+            self.logger.info(f"🔗 OpenAI base URL configured: {self.config.api.openai_base_url}")
+        if self.config.api.disable_proxy:
+            self.logger.info("🚫 Proxy usage disabled for OpenAI-compatible clients")
         
         # Gemini 2.5 Pro
         genai.configure(api_key=self.config.api.google_api_key)
@@ -356,21 +376,27 @@ class MultiLLMGenerator:
                     messages.append({"role": "system", "content": system_prompt})
                 messages.append({"role": "user", "content": prompt})
                 
+                request_kwargs: Dict[str, Any] = {}
+                if self.config.api.openai_timeout:
+                    request_kwargs["timeout"] = self.config.api.openai_timeout
+
                 # Handle different OpenAI models with appropriate token limits
                 if self.config.api.default_model_openai.startswith(("o1", "o3", "o4")):
                     self.logger.info(f"🔧 Using o-series format with max_completion_tokens=100000")
                     response = await self.openai_client.chat.completions.create(
                         model=self.config.api.default_model_openai,
                         messages=messages,
-                        max_completion_tokens=100000  # o-series supports 100K+, maximizing for comprehensive generation
+                        max_completion_tokens=100000,  # o-series supports 100K+, maximizing for comprehensive generation
+                        **request_kwargs
                     )
                 elif self.config.api.default_model_openai.startswith("gpt-5"):
                     self.logger.info(f"🔧 Using GPT-5 format with max_completion_tokens=50000")
                     response = await self.openai_client.chat.completions.create(
                         model=self.config.api.default_model_openai,
                         messages=messages,
-                        max_completion_tokens=50000  # GPT-5 series optimized generation limit
+                        max_completion_tokens=50000,  # GPT-5 series optimized generation limit
                         # Note: GPT-5 only supports default temperature (1.0), omitting temperature parameter
+                        **request_kwargs
                     )
                 elif self.config.api.default_model_openai.startswith(("gpt-4o", "gpt-4-turbo")):
                     self.logger.info(f"🔧 Using GPT-4o/turbo format with max_tokens=16384")
@@ -378,7 +404,8 @@ class MultiLLMGenerator:
                         model=self.config.api.default_model_openai,
                         messages=messages,
                         max_tokens=16384,  # GPT-4o/turbo max limit
-                        temperature=0.7
+                        temperature=0.7,
+                        **request_kwargs
                     )
                 elif self.config.api.default_model_openai.startswith("gpt-4"):
                     self.logger.info(f"🔧 Using GPT-4 format with max_tokens=8192")  
@@ -386,7 +413,8 @@ class MultiLLMGenerator:
                         model=self.config.api.default_model_openai,
                         messages=messages,
                         max_tokens=8192,  # GPT-4 standard limit
-                        temperature=0.7
+                        temperature=0.7,
+                        **request_kwargs
                     )
                 else:
                     self.logger.info(f"🔧 Using standard format with max_tokens=4096")
@@ -394,7 +422,8 @@ class MultiLLMGenerator:
                         model=self.config.api.default_model_openai,
                         messages=messages,
                         max_tokens=4096,  # Conservative default
-                        temperature=0.7
+                        temperature=0.7,
+                        **request_kwargs
                     )
                 
                 content = response.choices[0].message.content
@@ -411,6 +440,84 @@ class MultiLLMGenerator:
         
         return await retry_with_backoff(_make_openai_call, provider="OpenAI o3")
     
+    async def generate_with_custom_model(self, prompt: str, system_prompt: str = None, model_override: Optional[str] = None) -> str:
+        """Generate content using a custom OpenAI-compatible endpoint"""
+
+        target_model = model_override or self.config.api.custom_model_name
+        if not target_model:
+            raise APIError("Custom", "CONFIG_ERROR", "Custom model name not configured. Set api.custom_model_name or CUSTOM_MODEL_NAME env.")
+
+        base_url = (self.config.api.custom_model_base_url or self.config.api.openai_base_url)
+        if not base_url:
+            raise APIError("Custom", "CONFIG_ERROR", "Custom model base URL not configured. Set api.custom_model_base_url or OPENAI_BASE_URL env.")
+        base_url = base_url.rstrip("/")
+
+        api_key = self.config.api.custom_model_api_key or self.config.api.openai_api_key
+        if not api_key:
+            raise APIError("Custom", "AUTH_FAILED", "Custom model API key not configured. Set api.custom_model_api_key or OPENAI_API_KEY env.")
+
+        client_timeout = self.config.api.custom_model_client_timeout or self.config.api.openai_timeout
+        request_timeout = self.config.api.custom_model_timeout or self.config.api.openai_timeout
+        signature = (base_url, api_key)
+
+        if self.custom_openai_client is None or self._custom_client_signature != signature:
+            if self._custom_http_client is not None:
+                try:
+                    await self._custom_http_client.aclose()
+                except Exception as close_error:
+                    self.logger.debug(f"⚠️ Failed to close previous custom HTTP client: {close_error}")
+                finally:
+                    self._custom_http_client = None
+
+            client_kwargs: Dict[str, Any] = {
+                "api_key": api_key,
+                "base_url": base_url,
+            }
+
+            if client_timeout:
+                client_kwargs["timeout"] = client_timeout
+
+            if self.config.api.disable_proxy:
+                self._custom_http_client = httpx.AsyncClient(trust_env=False)
+                client_kwargs["http_client"] = self._custom_http_client
+
+            self.custom_openai_client = openai.AsyncOpenAI(**client_kwargs)
+            self._custom_client_signature = signature
+            self.logger.info(f"🔌 Custom model client initialized for {target_model} @ {base_url}")
+        else:
+            self.logger.debug(f"♻️ Reusing cached custom client for {target_model}")
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        async def _make_custom_call():
+            async with await self.rate_limiter.acquire("custom"):
+                response = await self.custom_openai_client.chat.completions.create(
+                    model=target_model,
+                    messages=messages,
+                    max_tokens=self.config.api.custom_model_max_tokens,
+                    temperature=self.config.api.custom_model_temperature,
+                    timeout=request_timeout
+                )
+
+            content = response.choices[0].message.content if response.choices else None
+            if content is None or content.strip() == "":
+                raise APIError("Custom", "EMPTY_RESPONSE", f"Custom model {target_model} returned empty content")
+
+            self.logger.info(f"📤 Custom model response length: {len(content)} chars")
+            return content
+
+        try:
+            return await retry_with_backoff(_make_custom_call, provider=f"Custom {target_model}")
+        except APIError:
+            raise
+        except asyncio.TimeoutError as e:
+            raise APIError("Custom", "TIMEOUT", f"Request timeout for custom model {target_model}: {str(e)}") from e
+        except Exception as e:
+            raise APIError("Custom", "GENERATION_ERROR", f"Custom model {target_model} error: {str(e)}", original_error=e) from e
+
 
     async def generate_with_google(self, prompt: str, system_prompt: str = None) -> str:
         """Generate content using Gemini 2.5 Pro with retry logic and rate limiting"""
@@ -656,6 +763,15 @@ class MultiLLMGenerator:
                 return await self.generate_with_openai(prompt, system_prompt)
             elif model_type == "google":
                 return await self.generate_with_google(prompt, system_prompt)
+            elif model_type == "custom":
+                return await self.generate_with_custom_model(prompt, system_prompt)
+            elif model_type.startswith("custom:"):
+                override_model = model_type.split(":", 1)[1].strip()
+                return await self.generate_with_custom_model(
+                    prompt,
+                    system_prompt,
+                    model_override=override_model or None
+                )
             elif model_type == "claude":
                 # Default to Claude Sonnet 4 for balanced performance
                 return await self.generate_with_claude(prompt, "claude-sonnet-4", system_prompt)
@@ -670,7 +786,7 @@ class MultiLLMGenerator:
                 # Assume it's a Hugging Face model ID if it contains "/"
                 return await self.generate_with_huggingface(model_type, prompt, system_prompt)
             else:
-                supported = "'openai', 'google', 'claude', 'claude-sonnet-4', 'claude-opus-4', 'claude-sonnet-3.7'"
+                supported = "'openai', 'google', 'custom', 'claude', 'claude-sonnet-4', 'claude-opus-4', 'claude-sonnet-3.7'"
                 if HF_AVAILABLE:
                     supported += ", 'huggingface:model-name', 'hf:model-name', or any Hugging Face model ID"
                 raise ValueError(f"Unknown model type: {model_type}. Supported: {supported}")

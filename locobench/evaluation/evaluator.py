@@ -2325,6 +2325,7 @@ Generate your response now:"""
             'gpt-5-mini': 'openai',
             'gpt-5-nano': 'openai',
             'gpt-5-chat-latest': 'openai',
+            'custom': 'custom',
             
             # GPT-4.1 series
             'gpt-4.1': 'openai',
@@ -2428,12 +2429,17 @@ Generate your response now:"""
             logger.warning(f"Model name is not a string: {type(model_name)} = {model_name}")
             model_name = str(model_name)
         
-        # Check if it's a Hugging Face model ID (contains /)
-        if '/' in model_name and model_name not in model_key_mapping:
+        normalized_model_name = model_name.lower()
+
+        if normalized_model_name.startswith('custom:'):
+            model_key = model_name  # Preserve original casing for downstream logging
+        elif normalized_model_name == 'custom':
+            model_key = 'custom'
+        elif '/' in model_name and normalized_model_name not in model_key_mapping:
             # Treat as Hugging Face model directly
             model_key = model_name
         else:
-            model_key = model_key_mapping.get(model_name.lower(), 'openai')
+            model_key = model_key_mapping.get(normalized_model_name, 'openai')
         
         # Retry logic for empty responses
         max_retries = 3
@@ -2454,6 +2460,14 @@ Generate your response now:"""
                     response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
                     # Restore original model
                     self.llm_generator.config.api.default_model_google = original_model
+                elif model_key == 'custom' or model_key.startswith('custom:'):
+                    target_display = None
+                    if ':' in model_key:
+                        target_display = model_key.split(':', 1)[1] or None
+                    if not target_display:
+                        target_display = self.llm_generator.config.api.custom_model_name or model_name
+                    logger.info(f"⚙️ Calling custom model: {target_display}")
+                    response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
                 elif '/' in model_key or model_key.startswith('huggingface:') or model_key.startswith('hf:'):
                     # Hugging Face model - use directly
                     response = await self.llm_generator.generate_with_model(model_key, solution_prompt)
