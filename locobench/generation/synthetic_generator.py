@@ -398,6 +398,32 @@ class MultiLLMGenerator:
                         # Note: GPT-5 only supports default temperature (1.0), omitting temperature parameter
                         **request_kwargs
                     )
+                elif self.config.api.default_model_openai.startswith(("custom", "gpt-oss-120b")):
+                    target_model = self.config.api.default_model_openai
+                    if target_model.startswith("custom:"):
+                        target_model = target_model.split(":", 1)[1] or self.config.api.custom_model_name or target_model
+                    elif target_model == "custom":
+                        target_model = self.config.api.custom_model_name or target_model
+
+                    # Allow fallback if config specifies dedicated custom name
+                    if target_model == "gpt-oss-120b" and self.config.api.custom_model_name:
+                        target_model = self.config.api.custom_model_name
+
+                    max_tokens = self.config.api.custom_model_max_tokens or 8192
+                    temperature = self.config.api.custom_model_temperature if self.config.api.custom_model_temperature is not None else 0.1
+                    custom_request_kwargs = dict(request_kwargs)
+                    custom_timeout = self.config.api.custom_model_timeout or self.config.api.openai_timeout
+                    if custom_timeout:
+                        custom_request_kwargs["timeout"] = custom_timeout
+
+                    self.logger.info(f"🔧 Using custom format with max_tokens={max_tokens}")
+                    response = await self.openai_client.chat.completions.create(
+                        model=target_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        **custom_request_kwargs
+                    )
                 elif self.config.api.default_model_openai.startswith(("gpt-4o", "gpt-4-turbo")):
                     self.logger.info(f"🔧 Using GPT-4o/turbo format with max_tokens=16384")
                     response = await self.openai_client.chat.completions.create(
