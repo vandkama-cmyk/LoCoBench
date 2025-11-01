@@ -1,6 +1,16 @@
 api:
   default_model_google: gemini-2.5-pro
   default_model_openai: o3
+  openai_base_url: null
+  openai_timeout: 60
+  custom_model_name: null
+  custom_model_base_url: null
+  custom_model_api_key: null
+  custom_model_temperature: 0.1
+  custom_model_max_tokens: 32000
+  custom_model_timeout: 30
+  custom_model_client_timeout: 45
+  disable_proxy: false
   max_concurrent_requests: 300
   max_requests_per_minute: 600
 data:
