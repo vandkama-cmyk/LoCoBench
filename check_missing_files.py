@@ -23,34 +23,82 @@ def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
             context_files = scenario.get('context_files', [])
             
             # Извлечь имя проекта из scenario_id
-            # Формат: {project_name}_{task_category}_{difficulty}_{num}
+            # Формат: {project_name_with_number}_{task_category}_{difficulty}_{num}
+            # Пример: java_web_ecommerce_expert_036_feature_implementation_hard_01
+            # где project_name_with_number = java_web_ecommerce_expert_036
             if scenario_id:
                 parts = scenario_id.split('_')
                 if len(parts) >= 4:
-                    # Найти первую часть, которая соответствует проекту
-                    # Обычно это первые несколько частей до task_category
-                    project_name = None
+                    # Найти task_category в частях
+                    # Task categories: feature, bug, refactor, security, performance, test
                     task_categories = ['feature', 'bug', 'refactor', 'security', 'performance', 'test']
+                    project_name = None
                     
+                    # Ищем task_category в частях
                     for i in range(len(parts)):
                         if parts[i] in task_categories and i > 0:
+                            # Взять все части до task_category (включая номер проекта)
                             project_name = '_'.join(parts[:i])
                             break
                     
+                    # Если task_category не найден, попробуем найти difficulty
                     if not project_name:
-                        # Fallback: взять первые части
-                        project_name = '_'.join(parts[:min(4, len(parts))])
+                        difficulties = ['easy', 'medium', 'hard', 'expert']
+                        for i in range(len(parts)):
+                            if parts[i] in difficulties and i > 0:
+                                # Проверим, нет ли task_category перед difficulty
+                                # Если есть числа перед difficulty, это может быть номер проекта
+                                # Возьмем все до difficulty
+                                project_name = '_'.join(parts[:i])
+                                break
                     
-                    if isinstance(context_files, list):
-                        project_files[project_name].extend(context_files)
-                    elif isinstance(context_files, dict):
-                        project_files[project_name].extend(context_files.keys())
+                    # Если все еще не найдено, попробуем найти паттерн с номером в конце
+                    # (последние 3 символа перед task_category/difficulty должны быть числа)
+                    if not project_name and len(parts) >= 5:
+                        # Попробуем найти паттерн: ..._XXX_task_category или ..._XXX_difficulty
+                        # где XXX - трехзначное число
+                        for i in range(2, len(parts) - 2):
+                            # Проверим, является ли текущая часть числом (номер проекта)
+                            if parts[i].isdigit() and len(parts[i]) == 3:
+                                # Следующая часть должна быть task_category или difficulty
+                                if i + 1 < len(parts) and (parts[i + 1] in task_categories or parts[i + 1] in ['easy', 'medium', 'hard', 'expert']):
+                                    project_name = '_'.join(parts[:i + 1])
+                                    break
+                    
+                    # Fallback: если ничего не найдено, возьмем больше частей
+                    # Обычно проект имеет формат: language_category_type_level_number
+                    if not project_name:
+                        # Попробуем взять части до первого числового значения (номера сценария)
+                        # или до известных ключевых слов
+                        for i in range(len(parts)):
+                            if parts[i].isdigit() and len(parts[i]) <= 2:  # Номер сценария (01, 02, etc)
+                                if i > 0:
+                                    project_name = '_'.join(parts[:i])
+                                    break
+                        
+                        # Если все еще не найдено, возьмем первые 5 частей (обычно достаточно)
+                        if not project_name:
+                            project_name = '_'.join(parts[:min(5, len(parts))])
+                    
+                    if project_name:
+                        if isinstance(context_files, list):
+                            project_files[project_name].extend(context_files)
+                        elif isinstance(context_files, dict):
+                            project_files[project_name].extend(context_files.keys())
+                    else:
+                        print(f"⚠️ Не удалось извлечь имя проекта из scenario_id: {scenario_id}")
         except Exception as e:
             print(f"Ошибка при чтении {scenario_file}: {e}")
     
     # Удалить дубликаты
     for project in project_files:
         project_files[project] = list(set(project_files[project]))
+    
+    # Вывести информацию о найденных проектах для отладки
+    print(f"\nНайдено проектов в сценариях: {len(project_files)}")
+    print("Примеры проектов:")
+    for i, project_name in enumerate(list(project_files.keys())[:10], 1):
+        print(f"  {i}. {project_name} ({len(project_files[project_name])} файлов)")
     
     return project_files
 
@@ -113,6 +161,34 @@ def check_missing_files(generated_dir: Path, scenarios_dir: Path) -> Dict[str, D
         # Найти реальные файлы
         actual_files = find_actual_files(generated_dir, project_name)
         print(f"  Найдено файлов: {len(actual_files)}")
+        
+        # Если директория проекта не найдена, попробовать найти похожие директории
+        project_path = generated_dir / project_name
+        if not project_path.exists():
+            # Попробовать найти директории, которые начинаются с project_name
+            potential_dirs = []
+            if generated_dir.exists():
+                for dir_path in generated_dir.iterdir():
+                    if dir_path.is_dir() and dir_path.name.startswith(project_name):
+                        potential_dirs.append(dir_path.name)
+            
+            if potential_dirs:
+                print(f"  ⚠️ Директория {project_name} не найдена, но найдены похожие: {potential_dirs[:3]}")
+                # Использовать первую найденную директорию
+                project_name = potential_dirs[0]
+                actual_files = find_actual_files(generated_dir, project_name)
+                print(f"  Используется директория: {project_name}, найдено файлов: {len(actual_files)}")
+            else:
+                print(f"  ⚠️ Директория {project_name} не найдена!")
+                results[project_name] = {
+                    'total_expected': len(expected_files),
+                    'total_found': 0,
+                    'total_missing': len(expected_files),
+                    'missing_files': [{'expected_path': f, 'normalized_path': f} for f in expected_files[:50]],
+                    'missing_count': len(expected_files),
+                    'error': 'Project directory not found'
+                }
+                continue
         
         # Определить имя директории проекта
         project_path = generated_dir / project_name
