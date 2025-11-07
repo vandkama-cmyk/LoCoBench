@@ -153,7 +153,7 @@ class RetrievalConfig:
     # Chunk size for code splitting (characters)
     chunk_size: int = 512
 
-    # Upper bound on the number of retrieval tokens inserted into the prompt
+    # Upper bound on the retrieval context length (in characters)
     max_context_tokens: int = 4096
 
     # Optional local path to embedding model (SentenceTransformer) to avoid downloads
