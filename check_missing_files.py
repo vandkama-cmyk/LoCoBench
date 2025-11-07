@@ -65,18 +65,37 @@ def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
                                     project_name = '_'.join(parts[:i + 1])
                                     break
                     
-                    # Fallback: если ничего не найдено, возьмем больше частей
+                    # Fallback: если ничего не найдено, попробуем найти номер проекта
                     # Обычно проект имеет формат: language_category_type_level_number
                     if not project_name:
-                        # Попробуем взять части до первого числового значения (номера сценария)
-                        # или до известных ключевых слов
+                        # Ищем трехзначное число (номер проекта) перед task_category/difficulty
+                        # или двухзначное число, если это не номер сценария в конце
                         for i in range(len(parts)):
-                            if parts[i].isdigit() and len(parts[i]) <= 2:  # Номер сценария (01, 02, etc)
-                                if i > 0:
-                                    project_name = '_'.join(parts[:i])
-                                    break
+                            # Проверим, является ли текущая часть числом
+                            if parts[i].isdigit():
+                                # Если это трехзначное число или двухзначное число не в конце
+                                if len(parts[i]) == 3 or (len(parts[i]) == 2 and i < len(parts) - 2):
+                                    # Проверим, что следующая часть не является task_category или difficulty
+                                    if i + 1 < len(parts):
+                                        next_part = parts[i + 1]
+                                        if next_part not in task_categories and next_part not in ['easy', 'medium', 'hard', 'expert', 'implementation', 'fix']:
+                                            # Это может быть номер проекта
+                                            project_name = '_'.join(parts[:i + 1])
+                                            break
+                                        elif next_part in task_categories:
+                                            # Это точно номер проекта перед task_category
+                                            project_name = '_'.join(parts[:i + 1])
+                                            break
                         
-                        # Если все еще не найдено, возьмем первые 5 частей (обычно достаточно)
+                        # Если все еще не найдено, возьмем части до первого task_category/difficulty слова
+                        if not project_name:
+                            for i in range(len(parts)):
+                                if parts[i] in ['implementation', 'fix', 'analysis'] or (parts[i] in ['easy', 'medium', 'hard', 'expert'] and i > 3):
+                                    if i > 0:
+                                        project_name = '_'.join(parts[:i])
+                                        break
+                        
+                        # Последний fallback: возьмем первые 5 частей (обычно достаточно)
                         if not project_name:
                             project_name = '_'.join(parts[:min(5, len(parts))])
                     
@@ -97,8 +116,21 @@ def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
     # Вывести информацию о найденных проектах для отладки
     print(f"\nНайдено проектов в сценариях: {len(project_files)}")
     print("Примеры проектов:")
-    for i, project_name in enumerate(list(project_files.keys())[:10], 1):
+    for i, project_name in enumerate(list(project_files.keys())[:20], 1):
         print(f"  {i}. {project_name} ({len(project_files[project_name])} файлов)")
+    
+    # Проверить, нет ли проектов без номеров
+    projects_without_numbers = []
+    for project_name in project_files.keys():
+        # Проверить, заканчивается ли имя проекта на число
+        parts = project_name.split('_')
+        if parts and not parts[-1].isdigit():
+            projects_without_numbers.append(project_name)
+    
+    if projects_without_numbers:
+        print(f"\n⚠️ ВНИМАНИЕ: Найдено {len(projects_without_numbers)} проектов без номеров:")
+        for p in projects_without_numbers[:10]:
+            print(f"  - {p}")
     
     return project_files
 
@@ -163,33 +195,21 @@ def check_missing_files(generated_dir: Path, scenarios_dir: Path) -> Dict[str, D
         actual_files = find_actual_files(generated_dir, project_name)
         print(f"  Найдено файлов: {len(actual_files)}")
         
-        # Если директория проекта не найдена, попробовать найти похожие директории
+        # Если директория проекта не найдена, попробовать найти точное совпадение
         project_path = generated_dir / project_name
         if not project_path.exists():
-            # Попробовать найти директории, которые начинаются с project_name
-            potential_dirs = []
-            if generated_dir.exists():
-                for dir_path in generated_dir.iterdir():
-                    if dir_path.is_dir() and dir_path.name.startswith(project_name):
-                        potential_dirs.append(dir_path.name)
-            
-            if potential_dirs:
-                print(f"  ⚠️ Директория {project_name} не найдена, но найдены похожие: {potential_dirs[:3]}")
-                # Использовать первую найденную директорию
-                project_name = potential_dirs[0]
-                actual_files = find_actual_files(generated_dir, project_name)
-                print(f"  Используется директория: {project_name}, найдено файлов: {len(actual_files)}")
-            else:
-                print(f"  ⚠️ Директория {project_name} не найдена!")
-                results[project_name] = {
-                    'total_expected': len(expected_files),
-                    'total_found': 0,
-                    'total_missing': len(expected_files),
-                    'missing_files': [{'expected_path': f, 'normalized_path': f} for f in expected_files[:50]],
-                    'missing_count': len(expected_files),
-                    'error': 'Project directory not found'
-                }
-                continue
+            # НЕ использовать похожие директории - каждый проект должен иметь свою директорию
+            # Если директория не найдена, значит проект отсутствует
+            print(f"  ⚠️ Директория {project_name} не найдена!")
+            results[project_name] = {
+                'total_expected': len(expected_files),
+                'total_found': 0,
+                'total_missing': len(expected_files),
+                'missing_files': [{'expected_path': f, 'normalized_path': f} for f in expected_files[:50]],
+                'missing_count': len(expected_files),
+                'error': 'Project directory not found'
+            }
+            continue
         
         # Определить имя директории проекта и все возможные поддиректории
         project_path = generated_dir / project_name
