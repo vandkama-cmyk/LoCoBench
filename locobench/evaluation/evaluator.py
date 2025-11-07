@@ -7,6 +7,7 @@ on long-context development tasks using our automated validation framework.
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -2342,16 +2343,25 @@ class LoCoBenchEvaluator:
                             # This handles cases like:
                             # - scholarport-gateway/src/... -> src/...
                             # - data/generated/.../scholarport-gateway/scholarport-gateway/src/... -> src/...
+                            # Important: Only remove if it's followed by '/' or '\' to avoid partial matches
                             if project_dir_name in normalized_path:
-                                # Find the last occurrence of project_dir_name
-                                idx = normalized_path.rfind(project_dir_name)
+                                # Find the last occurrence of project_dir_name followed by a path separator
+                                search_pattern = project_dir_name + '/'
+                                idx = normalized_path.rfind(search_pattern)
+                                if idx == -1:
+                                    # Try with backslash
+                                    search_pattern = project_dir_name + '\\'
+                                    idx = normalized_path.rfind(search_pattern)
+                                
                                 if idx != -1:
-                                    # Take everything after project_dir_name
-                                    after_project = normalized_path[idx + len(project_dir_name):]
-                                    # Remove leading slashes
-                                    after_project = after_project.lstrip('/').lstrip('\\')
+                                    # Take everything after project_dir_name + separator
+                                    after_project = normalized_path[idx + len(search_pattern):]
                                     if after_project:
                                         normalized_path = after_project
+                                else:
+                                    # Check if path ends with project_dir_name (shouldn't happen, but handle it)
+                                    if normalized_path.endswith(project_dir_name):
+                                        normalized_path = ''
                             
                             # Try multiple path combinations to handle different path formats
                             path_attempts = []
@@ -2400,6 +2410,7 @@ class LoCoBenchEvaluator:
                                 path_parts = file_path.split('/', 1) if '/' in file_path else file_path.split('\\', 1)
                                 if len(path_parts) > 1:
                                     potential_subdir_name = path_parts[0]
+                                    # Try exact match first
                                     potential_subdir = project_dir / potential_subdir_name
                                     if potential_subdir.exists() and potential_subdir.is_dir():
                                         # Try path relative to subdirectory
@@ -2413,6 +2424,52 @@ class LoCoBenchEvaluator:
                                                 file_loaded = True
                                             except Exception as e:
                                                 logger.warning(f"Failed to load context file {file_path} (attempted subdirectory path: {file_full_path}): {e}")
+                                    
+                                    # If not found, try to find subdirectory that starts with potential_subdir_name
+                                    if not file_loaded:
+                                        for subdir in project_dir.iterdir():
+                                            if subdir.is_dir() and subdir.name.startswith(potential_subdir_name):
+                                                subdir_path = path_parts[1] if len(path_parts) > 1 else ''
+                                                if subdir_path:
+                                                    file_full_path = subdir / subdir_path
+                                                    if file_full_path.exists():
+                                                        try:
+                                                            with open(file_full_path, 'r', encoding='utf-8') as f:
+                                                                context_files_content[file_path] = f.read()
+                                                            loaded_count += 1
+                                                            file_loaded = True
+                                                            break
+                                                        except Exception as e:
+                                                            logger.warning(f"Failed to load context file {file_path} (attempted subdirectory path: {file_full_path}): {e}")
+                                
+                                # Also try searching recursively if file still not found (as last resort)
+                                # Only do this for files with unique names to avoid false matches
+                                if not file_loaded:
+                                    file_name = Path(file_path).name
+                                    # Only search recursively if filename is reasonably unique (contains path info)
+                                    # Skip if it's just a generic name like "utils.java" or "config.java"
+                                    if file_name and len(file_name) > 10:  # Reasonable uniqueness check
+                                        matches_found = 0
+                                        found_path = None
+                                        for root, dirs, files in os.walk(project_dir):
+                                            if file_name in files:
+                                                matches_found += 1
+                                                if matches_found == 1:
+                                                    found_path = Path(root) / file_name
+                                                elif matches_found > 1:
+                                                    # Multiple matches - skip recursive search to avoid ambiguity
+                                                    found_path = None
+                                                    break
+                                        
+                                        if found_path and matches_found == 1:
+                                            try:
+                                                with open(found_path, 'r', encoding='utf-8') as f:
+                                                    context_files_content[file_path] = f.read()
+                                                loaded_count += 1
+                                                file_loaded = True
+                                                logger.debug(f"Found file {file_name} at {found_path} via recursive search")
+                                            except Exception as e:
+                                                logger.warning(f"Failed to load file {file_name} from {found_path}: {e}")
                             
                             if not file_loaded:
                                 # Log all attempted paths for debugging
@@ -2718,6 +2775,12 @@ Generate your response now:"""
         """Filter scenarios based on criteria"""
         
         filtered = scenarios
+        supported_languages = self.config.phase1.supported_languages
+        
+        # Если используем RAG - не фильтруем по языку, иначе применяем фильтр
+        if supported_languages:
+            filtered = [s for s in filtered if self._get_scenario_language(s) in supported_languages]
+            logger.info(f"🌍 Language filtering: {len(scenarios)} → {len(filtered)} scenarios")
         
         if task_categories:
             filtered = [s for s in filtered if s.get('task_category') in task_categories]
@@ -2726,6 +2789,33 @@ Generate your response now:"""
             filtered = [s for s in filtered if s.get('difficulty') in difficulty_levels]
         
         return filtered
+
+    def _get_scenario_language(self, scenario: Dict[str, Any]) -> str:
+        """Extract language from scenario ID"""
+        scenario_id = scenario.get('id', '')
+        if not scenario_id:
+            return 'unknown'
+
+        parts = scenario_id.split('_')
+        if not parts:
+            return 'unknown'
+        
+        language = parts[0].lower()
+
+        language_mapping = {
+            'c': 'c',
+            'cpp': 'cpp', 
+            'cs': 'csharp', 'csharp': 'csharp',
+            'go': 'go',
+            'java': 'java',
+            'js': 'javascript', 'javascript': 'javascript',
+            'php': 'php',
+            'py': 'python', 'python': 'python',
+            'rs': 'rust', 'rust': 'rust',
+            'ts': 'typescript', 'typescript': 'typescript'
+        }
+        
+        return language_mapping.get(language, language)
 
     def _get_letter_grade(self, score: float) -> str:
         """Convert numeric score to letter grade using config thresholds"""

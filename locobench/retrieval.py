@@ -314,16 +314,25 @@ def load_context_files_from_scenario(
             # This handles cases like:
             # - scholarport-gateway/src/... -> src/...
             # - data/generated/.../scholarport-gateway/scholarport-gateway/src/... -> src/...
+            # Important: Only remove if it's followed by '/' or '\' to avoid partial matches
             if project_dir_name and project_dir_name in normalized_path:
-                # Find the last occurrence of project_dir_name
-                idx = normalized_path.rfind(project_dir_name)
+                # Find the last occurrence of project_dir_name followed by a path separator
+                search_pattern = project_dir_name + '/'
+                idx = normalized_path.rfind(search_pattern)
+                if idx == -1:
+                    # Try with backslash
+                    search_pattern = project_dir_name + '\\'
+                    idx = normalized_path.rfind(search_pattern)
+                
                 if idx != -1:
-                    # Take everything after project_dir_name
-                    after_project = normalized_path[idx + len(project_dir_name):]
-                    # Remove leading slashes
-                    after_project = after_project.lstrip('/').lstrip('\\')
+                    # Take everything after project_dir_name + separator
+                    after_project = normalized_path[idx + len(search_pattern):]
                     if after_project:
                         normalized_path = after_project
+                else:
+                    # Check if path ends with project_dir_name (shouldn't happen, but handle it)
+                    if normalized_path.endswith(project_dir_name):
+                        normalized_path = ''
             
             # Try multiple path combinations to handle different path formats
             path_attempts = []
