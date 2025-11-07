@@ -2331,22 +2331,54 @@ class LoCoBenchEvaluator:
                             if not file_path:
                                 continue
                             
-                            # Normalize file path: remove project_dir name if it appears at the start
+                            # Normalize file path: remove project_dir name and leading slashes
                             # This handles cases where paths might include the project subdirectory name
                             normalized_path = file_path
-                            if file_path.startswith(project_dir_name + '/'):
-                                normalized_path = file_path[len(project_dir_name) + 1:]
-                            elif file_path.startswith(project_dir_name + '\\'):
-                                # Handle Windows-style paths
-                                normalized_path = file_path[len(project_dir_name) + 1:]
+                            
+                            # Remove leading slash if present (to avoid absolute paths)
+                            normalized_path = normalized_path.lstrip('/').lstrip('\\')
+                            
+                            # If path contains project_dir_name, extract relative path after the last occurrence
+                            # This handles cases like:
+                            # - scholarport-gateway/src/... -> src/...
+                            # - data/generated/.../scholarport-gateway/scholarport-gateway/src/... -> src/...
+                            if project_dir_name in normalized_path:
+                                # Find the last occurrence of project_dir_name
+                                idx = normalized_path.rfind(project_dir_name)
+                                if idx != -1:
+                                    # Take everything after project_dir_name
+                                    after_project = normalized_path[idx + len(project_dir_name):]
+                                    # Remove leading slashes
+                                    after_project = after_project.lstrip('/').lstrip('\\')
+                                    if after_project:
+                                        normalized_path = after_project
                             
                             # Try multiple path combinations to handle different path formats
                             path_attempts = []
-                            if normalized_path != file_path:
-                                # Try normalized path first (without project_dir name)
+                            # Always try normalized path first (without project_dir name and leading slashes)
+                            if normalized_path and normalized_path != file_path:
                                 path_attempts.append(normalized_path)
-                            # Always try original path as fallback
-                            path_attempts.append(file_path)
+                            # Try original path (but remove leading slash if present)
+                            original_normalized = file_path.lstrip('/').lstrip('\\')
+                            if original_normalized and original_normalized not in path_attempts:
+                                path_attempts.append(original_normalized)
+                            # Also try original path as-is if it's different
+                            if file_path not in path_attempts:
+                                path_attempts.append(file_path)
+                            
+                            # If normalized_path still looks like a full path (contains multiple slashes),
+                            # try to extract last few path components as fallback (but not just filename to avoid false matches)
+                            if '/' in normalized_path and normalized_path.count('/') > 2:
+                                path_parts = normalized_path.split('/')
+                                # Try using last 2-3 components (more specific than just filename)
+                                if len(path_parts) >= 2:
+                                    last_two = '/'.join(path_parts[-2:])
+                                    if last_two not in path_attempts:
+                                        path_attempts.append(last_two)
+                                if len(path_parts) >= 3:
+                                    last_three = '/'.join(path_parts[-3:])
+                                    if last_three not in path_attempts:
+                                        path_attempts.append(last_three)
                             
                             file_loaded = False
                             for path_attempt in path_attempts:
