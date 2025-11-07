@@ -59,6 +59,18 @@ async def run_full_retrieval_pipeline():
             context_files_dict = context_files
         else:
             context_files_dict = {}
+
+        metadata = scenario.get('metadata') or {}
+        project_dir = None
+        project_path = metadata.get('project_path')
+        if project_path:
+            candidate = Path(project_path)
+            if candidate.exists():
+                project_dir = candidate
+            else:
+                candidate = Path(config.data.generated_dir) / project_path
+                if candidate.exists():
+                    project_dir = candidate
         
         print(f"\n📁 Контекстные файлы: {len(context_files_dict)}")
         for filename in context_files_dict.keys():
@@ -77,7 +89,12 @@ async def run_full_retrieval_pipeline():
             task_prompt,
             top_k=config.retrieval.top_k,
             method=config.retrieval.method,
-            model_name=config.retrieval.model_name
+            model_name=config.retrieval.model_name,
+            project_dir=project_dir,
+            top_percent=config.retrieval.top_percent,
+            max_context_tokens=config.retrieval.max_context_tokens,
+            local_model_path=config.retrieval.local_model_path,
+            chunk_size=config.retrieval.chunk_size,
         )
         
         print(f"\n✅ Retrieval завершен")

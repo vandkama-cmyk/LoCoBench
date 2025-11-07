@@ -122,7 +122,9 @@ phase4:
       - hard
       - expert
     enabled: true
+    top_percent: 0.05
     max_context_tokens: 4096
     method: embedding
     model_name: all-MiniLM-L6-v2
+    local_model_path: null
     top_k: 5
