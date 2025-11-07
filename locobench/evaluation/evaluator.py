@@ -26,6 +26,7 @@ from ..core.task import TaskCategory, DifficultyLevel
 from ..generation.validation_framework import AutomatedValidator, ValidationResult
 from ..generation.synthetic_generator import MultiLLMGenerator
 from ..utils.llm_parsing import parse_llm_response
+from ..utils.token_counter import count_tokens
 from ..retrieval import retrieve_relevant, load_context_files_from_scenario
 
 logger = logging.getLogger(__name__)
@@ -2520,6 +2521,10 @@ Generate your response now:"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                # Count tokens before making the call
+                prompt_tokens = count_tokens(solution_prompt, model_name=model_name, provider=model_key)
+                logger.info(f"📊 Prompt tokens: {prompt_tokens:,} (chars: {len(solution_prompt):,})")
+                
                 # For evaluation, use the specific model name instead of default config
                 if model_key == 'openai':
                     # Temporarily override the default model for this evaluation
