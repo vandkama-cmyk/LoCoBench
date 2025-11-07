@@ -150,6 +150,9 @@ class RetrievalConfig:
     # Chunk size for code splitting (characters)
     chunk_size: int = 512
 
+    # Upper bound on the number of retrieval tokens inserted into the prompt
+    max_context_tokens: int = 4096
+
 
 @dataclass
 class Phase4Config:
