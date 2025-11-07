@@ -132,6 +132,7 @@ def normalize_path(path: str, project_dir_name: str = None) -> str:
     # Если путь содержит имя проекта, взять все после последнего вхождения с разделителем
     if project_dir_name and project_dir_name in normalized:
         # Найти последнее вхождение project_dir_name с разделителем пути
+        # Важно: искать только если за ним следует разделитель, чтобы избежать частичных совпадений
         search_pattern = project_dir_name + '/'
         idx = normalized.rfind(search_pattern)
         if idx == -1:
@@ -190,14 +191,19 @@ def check_missing_files(generated_dir: Path, scenarios_dir: Path) -> Dict[str, D
                 }
                 continue
         
-        # Определить имя директории проекта
+        # Определить имя директории проекта и все возможные поддиректории
         project_path = generated_dir / project_name
         project_dir_name = None
+        all_subdirs = []
+        
         if project_path.exists():
-            # Найти поддиректорию проекта
+            # Найти все поддиректории проекта
             subdirs = [d for d in project_path.iterdir() if d.is_dir()]
             if subdirs:
+                # Использовать первую поддиректорию как основную
                 project_dir_name = subdirs[0].name
+                # Сохранить все поддиректории для поиска
+                all_subdirs = [d.name for d in subdirs]
             else:
                 project_dir_name = project_name
         else:
@@ -208,59 +214,177 @@ def check_missing_files(generated_dir: Path, scenarios_dir: Path) -> Dict[str, D
         found_files = []
         
         for expected_file in expected_files:
+            # Нормализовать путь
             normalized_expected = normalize_path(expected_file, project_dir_name)
             
-            # Попробовать найти файл разными способами
+            # Создать список всех возможных вариантов пути для поиска
+            path_attempts = []
+            
+            # Вариант 1: нормализованный путь (без project_dir_name и ведущих слэшей)
+            if normalized_expected and normalized_expected != expected_file:
+                path_attempts.append(normalized_expected)
+            
+            # Вариант 2: оригинальный путь без ведущего слэша
+            original_no_slash = expected_file.lstrip('/').lstrip('\\')
+            if original_no_slash and original_no_slash not in path_attempts:
+                path_attempts.append(original_no_slash)
+            
+            # Вариант 3: оригинальный путь как есть
+            if expected_file not in path_attempts:
+                path_attempts.append(expected_file)
+            
+            # Вариант 4: если путь содержит много компонентов, попробовать последние 2-3
+            if '/' in normalized_expected and normalized_expected.count('/') > 2:
+                path_parts = normalized_expected.split('/')
+                if len(path_parts) >= 2:
+                    last_two = '/'.join(path_parts[-2:])
+                    if last_two not in path_attempts:
+                        path_attempts.append(last_two)
+                if len(path_parts) >= 3:
+                    last_three = '/'.join(path_parts[-3:])
+                    if last_three not in path_attempts:
+                        path_attempts.append(last_three)
+            
+            # Попробовать найти файл по всем вариантам путей
             found = False
-            
-            # Вариант 1: нормализованный путь
-            if normalized_expected in actual_files:
-                found = True
-                found_files.append(expected_file)
-                continue
-            
-            # Вариант 2: оригинальный путь
-            if expected_file in actual_files:
-                found = True
-                found_files.append(expected_file)
-                continue
-            
-            # Вариант 3: путь без ведущего слэша
-            no_slash = expected_file.lstrip('/').lstrip('\\')
-            if no_slash in actual_files:
-                found = True
-                found_files.append(expected_file)
-                continue
-            
-            # Вариант 4: поиск по имени файла (только если имя уникальное)
-            file_name = Path(expected_file).name
-            if file_name and len(file_name) > 10:  # Проверка на уникальность
-                matching_files = [f for f in actual_files if f.endswith('/' + file_name) or f == file_name]
-                if len(matching_files) == 1:
+            for path_attempt in path_attempts:
+                if path_attempt in actual_files:
                     found = True
                     found_files.append(expected_file)
+                    break
+            
+            # Если не найдено, попробовать нормализовать путь с использованием всех поддиректорий
+            if not found and all_subdirs:
+                for subdir_name in all_subdirs:
+                    normalized_with_subdir = normalize_path(expected_file, subdir_name)
+                    if normalized_with_subdir in actual_files:
+                        found = True
+                        found_files.append(expected_file)
+                        break
+                    # Также попробовать путь с именем поддиректории в начале
+                    if '/' in expected_file:
+                        path_parts = expected_file.split('/', 1)
+                        if len(path_parts) > 1:
+                            path_with_subdir = subdir_name + '/' + path_parts[1]
+                            if path_with_subdir in actual_files:
+                                found = True
+                                found_files.append(expected_file)
+                                break
+                if found:
                     continue
             
-            # Вариант 5: поиск в поддиректориях, если путь начинается с имени поддиректории
+            # Если не найдено, попробовать поиск в поддиректориях
             if not found and '/' in expected_file:
                 path_parts = expected_file.split('/', 1)
                 if len(path_parts) > 1:
-                    potential_subdir = path_parts[0]
-                    # Попробовать найти поддиректорию, которая начинается с potential_subdir
+                    potential_subdir_name = path_parts[0]
+                    subdir_path = path_parts[1]
+                    
+                    # Попробовать найти поддиректорию с точным совпадением
                     for actual_file in actual_files:
-                        if actual_file.startswith(potential_subdir + '/') or actual_file.startswith(potential_subdir + '\\'):
-                            # Проверить, совпадает ли остальная часть пути
+                        if actual_file.startswith(potential_subdir_name + '/') or actual_file.startswith(potential_subdir_name + '\\'):
                             if '/' in actual_file:
                                 actual_parts = actual_file.split('/', 1)
-                                if len(actual_parts) > 1 and actual_parts[1] == path_parts[1]:
+                                if len(actual_parts) > 1 and actual_parts[1] == subdir_path:
                                     found = True
                                     found_files.append(expected_file)
                                     break
+                    
+                    # Если не найдено, попробовать найти поддиректорию с частичным совпадением
+                    if not found:
+                        project_path = generated_dir / project_name
+                        if project_path.exists():
+                            # Попробовать все поддиректории
+                            for subdir in project_path.iterdir():
+                                if subdir.is_dir():
+                                    # Проверить точное совпадение или частичное (начинается с)
+                                    if subdir.name == potential_subdir_name or subdir.name.startswith(potential_subdir_name) or potential_subdir_name in subdir.name:
+                                        # Проверить, есть ли файл в этой поддиректории
+                                        potential_file_path = subdir / subdir_path
+                                        if potential_file_path.exists():
+                                            # Найти относительный путь от project_path
+                                            rel_path = potential_file_path.relative_to(project_path)
+                                            rel_path_str = str(rel_path).replace('\\', '/')
+                                            if rel_path_str in actual_files:
+                                                found = True
+                                                found_files.append(expected_file)
+                                                break
+                                    
+                                    # Также попробовать нормализовать путь с этой поддиректорией
+                                    if not found:
+                                        # Попробовать путь относительно этой поддиректории
+                                        normalized_with_subdir = normalize_path(expected_file, subdir.name)
+                                        if normalized_with_subdir in actual_files:
+                                            found = True
+                                            found_files.append(expected_file)
+                                            break
+                                        
+                                        # Попробовать путь с именем поддиректории
+                                        path_with_subdir = subdir.name + '/' + subdir_path
+                                        if path_with_subdir in actual_files:
+                                            found = True
+                                            found_files.append(expected_file)
+                                            break
+                                
+                                if found:
+                                    break
+            
+            # Если все еще не найдено, попробовать поиск по имени файла (только если имя уникальное)
+            if not found:
+                file_name = Path(expected_file).name
+                if file_name and len(file_name) > 10:  # Проверка на уникальность имени
+                    matching_files = []
+                    for actual_file in actual_files:
+                        if actual_file.endswith('/' + file_name) or actual_file == file_name:
+                            matching_files.append(actual_file)
+                    
+                    if len(matching_files) == 1:
+                        found = True
+                        found_files.append(expected_file)
+                    elif len(matching_files) > 1:
+                        # Несколько совпадений - попробовать найти по части пути
+                        # Взять последние 2 компонента из expected_file
+                        if '/' in expected_file:
+                            expected_parts = expected_file.split('/')
+                            if len(expected_parts) >= 2:
+                                expected_suffix = '/'.join(expected_parts[-2:])
+                                for match in matching_files:
+                                    if match.endswith(expected_suffix):
+                                        found = True
+                                        found_files.append(expected_file)
+                                        break
+            
+            # Если все еще не найдено, попробовать рекурсивный поиск по имени файла
+            if not found:
+                file_name = Path(expected_file).name
+                if file_name and len(file_name) > 15:  # Более строгая проверка на уникальность
+                    project_path = generated_dir / project_name
+                    if project_path.exists():
+                        matches_found = 0
+                        found_path = None
+                        for root, dirs, files in os.walk(project_path):
+                            if file_name in files:
+                                matches_found += 1
+                                if matches_found == 1:
+                                    found_path = Path(root) / file_name
+                                elif matches_found > 1:
+                                    # Несколько совпадений - пропустить
+                                    found_path = None
+                                    break
+                        
+                        if found_path and matches_found == 1:
+                            # Найти относительный путь
+                            rel_path = found_path.relative_to(project_path)
+                            rel_path_str = str(rel_path).replace('\\', '/')
+                            if rel_path_str in actual_files:
+                                found = True
+                                found_files.append(expected_file)
             
             if not found:
                 missing_files.append({
                     'expected_path': expected_file,
-                    'normalized_path': normalized_expected
+                    'normalized_path': normalized_expected,
+                    'attempted_paths': path_attempts[:5]  # Сохранить первые 5 попыток для отладки
                 })
         
         results[project_name] = {
