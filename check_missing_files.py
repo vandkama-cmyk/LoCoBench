@@ -99,7 +99,100 @@ def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
                         if not project_name:
                             project_name = '_'.join(parts[:min(5, len(parts))])
                     
+def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
+    """Найти все сценарии и извлечь из них список файлов по проектам"""
+    project_files = defaultdict(list)
+    scenario_to_project = {}  # Для отладки: отслеживание соответствия scenario_id -> project_name
+    
+    for scenario_file in scenarios_dir.glob("*.json"):
+        try:
+            with open(scenario_file, 'r', encoding='utf-8') as f:
+                scenario = json.load(f)
+            
+            scenario_id = scenario.get('id', '')
+            context_files = scenario.get('context_files', [])
+            
+            # Извлечь имя проекта из scenario_id
+            # Формат: {project_name_with_number}_{task_category}_{difficulty}_{num}
+            # Пример: java_web_ecommerce_expert_036_feature_implementation_hard_01
+            # где project_name_with_number = java_web_ecommerce_expert_036
+            if scenario_id:
+                parts = scenario_id.split('_')
+                if len(parts) >= 4:
+                    # Найти task_category в частях
+                    # Task categories: feature, bug, refactor, security, performance, test
+                    task_categories = ['feature', 'bug', 'refactor', 'security', 'performance', 'test']
+                    project_name = None
+                    
+                    # Ищем task_category в частях
+                    for i in range(len(parts)):
+                        if parts[i] in task_categories and i > 0:
+                            # Взять все части до task_category (включая номер проекта)
+                            project_name = '_'.join(parts[:i])
+                            break
+                    
+                    # Если task_category не найден, попробуем найти difficulty
+                    if not project_name:
+                        difficulties = ['easy', 'medium', 'hard', 'expert']
+                        for i in range(len(parts)):
+                            if parts[i] in difficulties and i > 0:
+                                # Проверим, нет ли task_category перед difficulty
+                                # Если есть числа перед difficulty, это может быть номер проекта
+                                # Возьмем все до difficulty
+                                project_name = '_'.join(parts[:i])
+                                break
+                    
+                    # Если все еще не найдено, попробуем найти паттерн с номером в конце
+                    # (последние 3 символа перед task_category/difficulty должны быть числа)
+                    if not project_name and len(parts) >= 5:
+                        # Попробуем найти паттерн: ..._XXX_task_category или ..._XXX_difficulty
+                        # где XXX - трехзначное число
+                        for i in range(2, len(parts) - 2):
+                            # Проверим, является ли текущая часть числом (номер проекта)
+                            if parts[i].isdigit() and len(parts[i]) == 3:
+                                # Следующая часть должна быть task_category или difficulty
+                                if i + 1 < len(parts) and (parts[i + 1] in task_categories or parts[i + 1] in ['easy', 'medium', 'hard', 'expert']):
+                                    project_name = '_'.join(parts[:i + 1])
+                                    break
+                    
+                    # Fallback: если ничего не найдено, попробуем найти номер проекта
+                    # Обычно проект имеет формат: language_category_type_level_number
+                    if not project_name:
+                        # Ищем трехзначное число (номер проекта) перед task_category/difficulty
+                        # или двухзначное число, если это не номер сценария в конце
+                        for i in range(len(parts)):
+                            # Проверим, является ли текущая часть числом
+                            if parts[i].isdigit():
+                                # Если это трехзначное число или двухзначное число не в конце
+                                if len(parts[i]) == 3 or (len(parts[i]) == 2 and i < len(parts) - 2):
+                                    # Проверим, что следующая часть не является task_category или difficulty
+                                    if i + 1 < len(parts):
+                                        next_part = parts[i + 1]
+                                        if next_part not in task_categories and next_part not in ['easy', 'medium', 'hard', 'expert', 'implementation', 'fix']:
+                                            # Это может быть номер проекта
+                                            project_name = '_'.join(parts[:i + 1])
+                                            break
+                                        elif next_part in task_categories:
+                                            # Это точно номер проекта перед task_category
+                                            project_name = '_'.join(parts[:i + 1])
+                                            break
+                        
+                        # Если все еще не найдено, возьмем части до первого task_category/difficulty слова
+                        if not project_name:
+                            for i in range(len(parts)):
+                                if parts[i] in ['implementation', 'fix', 'analysis'] or (parts[i] in ['easy', 'medium', 'hard', 'expert'] and i > 3):
+                                    if i > 0:
+                                        project_name = '_'.join(parts[:i])
+                                        break
+                        
+                        # Последний fallback: возьмем первые 5 частей (обычно достаточно)
+                        if not project_name:
+                            project_name = '_'.join(parts[:min(5, len(parts))])
+                    
                     if project_name:
+                        # Сохранить соответствие для отладки
+                        scenario_to_project[scenario_id] = project_name
+                        
                         if isinstance(context_files, list):
                             project_files[project_name].extend(context_files)
                         elif isinstance(context_files, dict):
@@ -131,6 +224,10 @@ def find_scenario_files(scenarios_dir: Path) -> Dict[str, List[str]]:
         print(f"\n⚠️ ВНИМАНИЕ: Найдено {len(projects_without_numbers)} проектов без номеров:")
         for p in projects_without_numbers[:10]:
             print(f"  - {p}")
+            # Показать примеры scenario_id для этого проекта
+            matching_scenarios = [sid for sid, pname in scenario_to_project.items() if pname == p]
+            if matching_scenarios:
+                print(f"    Примеры scenario_id: {matching_scenarios[:3]}")
     
     return project_files
 
@@ -417,10 +514,17 @@ def check_missing_files(generated_dir: Path, scenarios_dir: Path) -> Dict[str, D
             'total_found': len(found_files),
             'total_missing': len(missing_files),
             'missing_files': missing_files[:50],  # Ограничить до 50 для читаемости
-            'missing_count': len(missing_files)
+            'missing_count': len(missing_files),
+            'found_files_count': len(found_files)  # Добавить для отладки
         }
         
         print(f"  Найдено: {len(found_files)}, Отсутствует: {len(missing_files)}")
+        
+        # Отладочный вывод для проектов с проблемами
+        if len(found_files) == 0 and len(expected_files) > 0:
+            print(f"  ⚠️ ВНИМАНИЕ: Для проекта {project_name} не найдено ни одного файла из {len(expected_files)} ожидаемых!")
+            print(f"     Примеры ожидаемых путей: {expected_files[:3]}")
+            print(f"     Примеры реальных путей в директории: {list(actual_files)[:5]}")
     
     return results
 
