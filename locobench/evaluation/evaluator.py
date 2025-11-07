@@ -2225,25 +2225,99 @@ class LoCoBenchEvaluator:
                     elif scenario_id:
                         # Try to infer from scenario_id - look for project in generated_dir
                         generated_dir = Path(self.config.data.generated_dir)
-                        if generated_dir.exists():
-                            # Search for project directories
+                        if not generated_dir.exists():
+                            logger.warning(f"⚠️ Generated directory does not exist: {generated_dir}")
+                            logger.warning(f"⚠️ Cannot load context files for scenario {scenario_id}. Please ensure the generated directory exists and contains project folders.")
+                        elif generated_dir.exists():
+                            # Extract base project identifier from scenario_id
+                            # Scenario IDs can be like: "php_web_cms_hard_038" or 
+                            # "c_desktop_productivity_medium_019_integration_testing_expert_01"
+                            # We need to find the matching project directory
+                            scenario_parts = scenario_id.split('_')
+                            
+                            # Extract base identifier - typically language_category_difficulty_number
+                            # Try different base lengths: full, without last part, without last 2 parts, etc.
+                            base_candidates = []
+                            if len(scenario_parts) >= 4:
+                                # Try: language_category_difficulty_number (e.g., "php_web_cms_hard_038")
+                                base_candidates.append('_'.join(scenario_parts[:5]))  # First 5 parts
+                                base_candidates.append('_'.join(scenario_parts[:4]))  # First 4 parts
+                            if len(scenario_parts) >= 3:
+                                base_candidates.append('_'.join(scenario_parts[:3]))  # First 3 parts
+                            base_candidates.append(scenario_id)  # Full match
+                            
+                            # Try multiple matching strategies:
+                            # 1. Exact match
+                            # 2. Match by base identifier (first few parts)
+                            # 3. Match by language + category pattern
+                            
+                            potential_dirs = []
                             for project_folder in generated_dir.iterdir():
                                 if project_folder.is_dir():
-                                    project_dir = project_folder
-                                    break
+                                    folder_name = project_folder.name
+                                    # Exact match
+                                    if folder_name == scenario_id:
+                                        project_dir = project_folder
+                                        logger.info(f"✅ Found exact project directory match: {project_dir}")
+                                        break
+                                    # Check if folder name matches any base candidate
+                                    for base_candidate in base_candidates:
+                                        if folder_name == base_candidate or folder_name.startswith(base_candidate + '_'):
+                                            potential_dirs.append(project_folder)
+                                            break
+                                    # Check if scenario_id starts with folder name or vice versa
+                                    if scenario_id.startswith(folder_name) or folder_name.startswith(scenario_id):
+                                        if project_folder not in potential_dirs:
+                                            potential_dirs.append(project_folder)
+                                    # Check if they share significant prefix (at least 3 parts)
+                                    elif len(scenario_parts) >= 3:
+                                        folder_parts = folder_name.split('_')
+                                        # Check if first 3 parts match
+                                        if (len(folder_parts) >= 3 and 
+                                            scenario_parts[:3] == folder_parts[:3]):
+                                            if project_folder not in potential_dirs:
+                                                potential_dirs.append(project_folder)
+                            
+                            # If no exact match, use first potential match
+                            if project_dir is None and potential_dirs:
+                                project_dir = potential_dirs[0]
+                                logger.info(f"✅ Found project directory by pattern match: {project_dir} (from {len(potential_dirs)} candidates)")
+                            
+                            if project_dir is None:
+                                logger.warning(f"⚠️ Could not find project directory for scenario_id '{scenario_id}' in {generated_dir}")
+                                logger.debug(f"Available directories: {[d.name for d in generated_dir.iterdir() if d.is_dir()]}")
                     
                     # Load files if we found project directory
                     if project_dir and project_dir.exists():
+                        loaded_count = 0
+                        failed_count = 0
                         for file_path in context_files_list:
+                            # Clean up file path (remove leading/trailing whitespace)
+                            file_path = file_path.strip() if isinstance(file_path, str) else str(file_path).strip()
+                            if not file_path:
+                                continue
+                                
                             file_full_path = project_dir / file_path
                             if file_full_path.exists():
                                 try:
                                     with open(file_full_path, 'r', encoding='utf-8') as f:
                                         context_files_content[file_path] = f.read()
+                                    loaded_count += 1
                                 except Exception as e:
                                     logger.warning(f"Failed to load context file {file_path}: {e}")
+                                    failed_count += 1
                             else:
                                 logger.warning(f"Context file not found: {file_full_path}")
+                                failed_count += 1
+                        
+                        logger.info(f"📁 Loaded {loaded_count}/{len(context_files_list)} context files from {project_dir}")
+                        if failed_count > 0:
+                            logger.warning(f"⚠️ Failed to load {failed_count} context files")
+                    else:
+                        if not project_dir:
+                            logger.warning(f"⚠️ Project directory not found for scenario {scenario_id}")
+                        elif not project_dir.exists():
+                            logger.warning(f"⚠️ Project directory does not exist: {project_dir}")
                 
                 if context_files_content:
                     # Perform retrieval
@@ -2261,6 +2335,7 @@ class LoCoBenchEvaluator:
                         logger.warning(f"⚠️ Retrieval returned empty result for scenario {scenario.get('id', 'unknown')}")
                 else:
                     logger.warning(f"⚠️ Could not load context files for retrieval in scenario {scenario.get('id', 'unknown')}")
+                    logger.warning(f"⚠️ Retrieval is enabled but no context files were loaded. Model will work without retrieval context, which may lead to poor results or timeouts.")
                     
             except Exception as e:
                 logger.error(f"❌ Error during retrieval for scenario {scenario.get('id', 'unknown')}: {e}", exc_info=True)
