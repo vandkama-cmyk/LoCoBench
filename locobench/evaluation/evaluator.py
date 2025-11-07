@@ -2323,23 +2323,69 @@ class LoCoBenchEvaluator:
                     if project_dir and project_dir.exists():
                         loaded_count = 0
                         failed_count = 0
+                        project_dir_name = project_dir.name
+                        
                         for file_path in context_files_list:
                             # Clean up file path (remove leading/trailing whitespace)
                             file_path = file_path.strip() if isinstance(file_path, str) else str(file_path).strip()
                             if not file_path:
                                 continue
-                                
-                            file_full_path = project_dir / file_path
-                            if file_full_path.exists():
-                                try:
-                                    with open(file_full_path, 'r', encoding='utf-8') as f:
-                                        context_files_content[file_path] = f.read()
-                                    loaded_count += 1
-                                except Exception as e:
-                                    logger.warning(f"Failed to load context file {file_path}: {e}")
-                                    failed_count += 1
-                            else:
-                                logger.warning(f"Context file not found: {file_full_path}")
+                            
+                            # Normalize file path: remove project_dir name if it appears at the start
+                            # This handles cases where paths might include the project subdirectory name
+                            normalized_path = file_path
+                            if file_path.startswith(project_dir_name + '/'):
+                                normalized_path = file_path[len(project_dir_name) + 1:]
+                            elif file_path.startswith(project_dir_name + '\\'):
+                                # Handle Windows-style paths
+                                normalized_path = file_path[len(project_dir_name) + 1:]
+                            
+                            # Try multiple path combinations to handle different path formats
+                            path_attempts = []
+                            if normalized_path != file_path:
+                                # Try normalized path first (without project_dir name)
+                                path_attempts.append(normalized_path)
+                            # Always try original path as fallback
+                            path_attempts.append(file_path)
+                            
+                            file_loaded = False
+                            for path_attempt in path_attempts:
+                                file_full_path = project_dir / path_attempt
+                                if file_full_path.exists():
+                                    try:
+                                        with open(file_full_path, 'r', encoding='utf-8') as f:
+                                            context_files_content[file_path] = f.read()
+                                        loaded_count += 1
+                                        file_loaded = True
+                                        break
+                                    except Exception as e:
+                                        logger.warning(f"Failed to load context file {file_path} (attempted path: {path_attempt}): {e}")
+                            
+                            # If file not found and original path contains a subdirectory name,
+                            # try to find the subdirectory within project_dir
+                            if not file_loaded and project_dir.exists():
+                                # Check if the original file_path starts with a directory name
+                                path_parts = file_path.split('/', 1) if '/' in file_path else file_path.split('\\', 1)
+                                if len(path_parts) > 1:
+                                    potential_subdir_name = path_parts[0]
+                                    potential_subdir = project_dir / potential_subdir_name
+                                    if potential_subdir.exists() and potential_subdir.is_dir():
+                                        # Try path relative to subdirectory
+                                        subdir_path = path_parts[1]
+                                        file_full_path = potential_subdir / subdir_path
+                                        if file_full_path.exists():
+                                            try:
+                                                with open(file_full_path, 'r', encoding='utf-8') as f:
+                                                    context_files_content[file_path] = f.read()
+                                                loaded_count += 1
+                                                file_loaded = True
+                                            except Exception as e:
+                                                logger.warning(f"Failed to load context file {file_path} (attempted subdirectory path: {file_full_path}): {e}")
+                            
+                            if not file_loaded:
+                                # Log all attempted paths for debugging
+                                attempted_paths = [str(project_dir / p) for p in path_attempts]
+                                logger.warning(f"Context file not found. Attempted paths: {attempted_paths}")
                                 failed_count += 1
                         
                         logger.info(f"📁 Loaded {loaded_count}/{len(context_files_list)} context files from {project_dir}")
