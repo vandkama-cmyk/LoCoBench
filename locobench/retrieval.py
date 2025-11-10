@@ -359,7 +359,7 @@ def retrieve_relevant_embedding(
     )
 
     logger.info(
-        "Retrieval summary: project_dir=%s | candidates=%d | selected=%d | chars %d -> %d (Δ %.1f%%) | time %.2fs",
+        "Retrieval summary: project_dir=%s | candidates=%d | selected=%d | chars %d -> %d (Δ %.1f%%) | time %.2fs | max_context=%s",
         project_dir,
         len(candidates),
         len(trimmed_files),
@@ -367,6 +367,7 @@ def retrieve_relevant_embedding(
         selected_length_total,
         reduction_pct,
         duration,
+        max_context_tokens if max_context_tokens else "unlimited",
     )
     logger.debug(
         "Selected files: %s",

@@ -2267,13 +2267,18 @@ class LoCoBenchEvaluator:
 
             return None
 
-        project_dir: Optional[Path] = None
+        # Resolve project directory (needed for both retrieval and non-retrieval cases)
+        project_dir: Optional[Path] = _resolve_project_dir_for_scenario()
+        if project_dir:
+            logger.debug("📁 Resolved project directory: %s", project_dir)
+        else:
+            logger.debug("⚠️ Project directory not resolved for scenario %s", scenario.get('id', 'unknown'))
 
+        retrieved_context = ""
         if retrieval_config.enabled and difficulty in retrieval_config.difficulties:
             try:
                 logger.info("🔍 Applying retrieval for %s scenario: %s", difficulty, scenario.get('id', 'unknown'))
 
-                project_dir = _resolve_project_dir_for_scenario()
                 if project_dir:
                     logger.info("📁 Using project directory for retrieval: %s", project_dir)
                 else:
@@ -2327,8 +2332,36 @@ class LoCoBenchEvaluator:
                 retrieved_context = ""
 
         # Build context section
-        context_section = f"**CONTEXT FILES**: {', '.join(scenario.get('context_files', []))}"
-        if retrieved_context:
+        # If retrieval is disabled or not applicable, load full context files
+        if not retrieved_context:
+            # Load context files content when retrieval is not used
+            context_obj = scenario.get('context_files')
+            context_files_content = {}
+            
+            if isinstance(context_obj, dict):
+                # Context files are already provided as dict with content
+                context_files_content = {
+                    path: content for path, content in context_obj.items() if isinstance(content, str)
+                }
+            elif isinstance(context_obj, list) and project_dir:
+                # Context files are provided as list of paths - load them
+                context_files_content = load_context_files_from_scenario(
+                    scenario,
+                    project_dir=project_dir,
+                    include_all_project_files=False,
+                )
+            
+            # Format context files content
+            if context_files_content:
+                context_parts = []
+                for path, content in context_files_content.items():
+                    context_parts.append(f"### {path}\n```\n{content}\n```")
+                context_section = "**CONTEXT FILES**:\n\n" + "\n\n".join(context_parts)
+            else:
+                # Fallback: just list file names if we can't load content
+                context_section = f"**CONTEXT FILES**: {', '.join(scenario.get('context_files', []))}"
+        else:
+            # Use retrieved context when retrieval is enabled
             context_section = f"""**RETRIEVED CONTEXT** (use this for reasoning - most relevant code fragments):
 {retrieved_context}
 
@@ -2780,6 +2813,13 @@ def run_evaluation(config: Config, models: Optional[List[str]] = None,
                   max_concurrent_models: int = 2,
                   max_concurrent_scenarios: int = 1) -> Dict[str, Any]:
     """Main evaluation function called by CLI"""
+    
+    # Configure logging for retrieval module
+    retrieval_logger = logging.getLogger('locobench.retrieval')
+    retrieval_logger.setLevel(logging.INFO)
+    # Ensure retrieval logger has handlers (inherit from root logger if not set)
+    if not retrieval_logger.handlers:
+        retrieval_logger.addHandler(logging.StreamHandler())
     
     async def _async_evaluation():
         # Load scenarios from Phase 3
