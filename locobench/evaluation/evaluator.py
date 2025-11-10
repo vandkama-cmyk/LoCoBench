@@ -2200,8 +2200,7 @@ class LoCoBenchEvaluator:
         
 
 
-        # Apply retrieval if enabled and scenario difficulty matches
-        retrieved_context = ""
+        # Get difficulty and retrieval config
         difficulty = scenario.get('difficulty', '').lower()
         retrieval_config = self.config.retrieval
 
@@ -2274,6 +2273,10 @@ class LoCoBenchEvaluator:
         else:
             logger.debug("⚠️ Project directory not resolved for scenario %s", scenario.get('id', 'unknown'))
 
+        # Determine if we should load all project files (for hard/expert scenarios)
+        difficulty = scenario.get('difficulty', '').lower()
+        should_load_all_files = difficulty in ['hard', 'expert']
+        
         retrieved_context = ""
         if retrieval_config.enabled and difficulty in retrieval_config.difficulties:
             try:
@@ -2286,14 +2289,25 @@ class LoCoBenchEvaluator:
 
                 context_obj = scenario.get('context_files')
                 if isinstance(context_obj, dict):
+                    # Context files already provided as dict with content
                     context_files_content = {
                         path: content for path, content in context_obj.items() if isinstance(content, str)
                     }
+                    # For hard/expert: if we have project_dir, also load all project files for retrieval
+                    if should_load_all_files and project_dir and project_dir.exists():
+                        logger.info("📚 Loading additional project files for hard/expert scenario")
+                        all_project_files = load_context_files_from_scenario(
+                            scenario,
+                            project_dir=project_dir,
+                            include_all_project_files=True,
+                        )
+                        # Merge with existing context files (project files take precedence if path matches)
+                        context_files_content.update(all_project_files)
                 elif isinstance(context_obj, list) and project_dir:
                     context_files_content = load_context_files_from_scenario(
                         scenario,
                         project_dir=project_dir,
-                        include_all_project_files=False,
+                        include_all_project_files=should_load_all_files,
                     )
                 else:
                     context_files_content = {}
@@ -2343,23 +2357,50 @@ class LoCoBenchEvaluator:
                 context_files_content = {
                     path: content for path, content in context_obj.items() if isinstance(content, str)
                 }
+                # For hard/expert: if we have project_dir, also load all project files
+                if should_load_all_files and project_dir and project_dir.exists():
+                    logger.info("📚 Loading additional project files for hard/expert scenario (non-retrieval mode)")
+                    all_project_files = load_context_files_from_scenario(
+                        scenario,
+                        project_dir=project_dir,
+                        include_all_project_files=True,
+                    )
+                    # Merge with existing context files (project files take precedence if path matches)
+                    context_files_content.update(all_project_files)
             elif isinstance(context_obj, list) and project_dir:
                 # Context files are provided as list of paths - load them
+                # For hard/expert: load all project files, not just listed ones
                 context_files_content = load_context_files_from_scenario(
                     scenario,
                     project_dir=project_dir,
-                    include_all_project_files=False,
+                    include_all_project_files=should_load_all_files,
                 )
             
             # Format context files content
             if context_files_content:
                 context_parts = []
+                total_context_length = 0
                 for path, content in context_files_content.items():
                     context_parts.append(f"### {path}\n```\n{content}\n```")
+                    total_context_length += len(content)
+                
                 context_section = "**CONTEXT FILES**:\n\n" + "\n\n".join(context_parts)
+                logger.info(
+                    "📄 Loaded %d context files (%d chars) for %s scenario %s",
+                    len(context_files_content),
+                    total_context_length,
+                    difficulty,
+                    scenario.get('id', 'unknown'),
+                )
             else:
                 # Fallback: just list file names if we can't load content
                 context_section = f"**CONTEXT FILES**: {', '.join(scenario.get('context_files', []))}"
+                logger.warning(
+                    "⚠️ No context files loaded for scenario %s (project_dir=%s, difficulty=%s)",
+                    scenario.get('id', 'unknown'),
+                    project_dir,
+                    difficulty,
+                )
         else:
             # Use retrieved context when retrieval is enabled
             context_section = f"""**RETRIEVED CONTEXT** (use this for reasoning - most relevant code fragments):
