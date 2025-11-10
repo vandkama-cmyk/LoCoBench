@@ -2941,12 +2941,41 @@ def run_evaluation(config: Config, models: Optional[List[str]] = None,
         # Convert difficulty to list if specified
         difficulty_levels = [difficulty] if difficulty else None
         
+        # If retrieval is enabled and no explicit difficulty filter, auto-filter to retrieval difficulties
+        if config.retrieval.enabled and not difficulty_levels:
+            retrieval_difficulties = [d.lower() for d in config.retrieval.difficulties]
+            difficulty_levels = retrieval_difficulties
+            console.print(
+                f"🔍 Auto-filtering to retrieval difficulties: {retrieval_difficulties} "
+                f"(retrieval enabled but no explicit difficulty filter)"
+            )
+        
         # Filter scenarios using the evaluator's method
         filtered_scenarios = temp_evaluator._filter_scenarios(
             all_scenarios, 
             task_categories=categories,
             difficulty_levels=difficulty_levels
         )
+        
+        # Log difficulty distribution after filtering
+        if filtered_scenarios:
+            difficulty_counts = {}
+            for s in filtered_scenarios:
+                diff = s.get('difficulty', 'unknown').lower()
+                difficulty_counts[diff] = difficulty_counts.get(diff, 0) + 1
+            console.print(f"📊 Scenario difficulty distribution after filtering: {difficulty_counts}")
+            
+            # Warn if retrieval is enabled but we have scenarios outside retrieval difficulties
+            if config.retrieval.enabled:
+                retrieval_difficulties = [d.lower() for d in config.retrieval.difficulties]
+                non_retrieval_count = sum(
+                    count for diff, count in difficulty_counts.items() 
+                    if diff not in retrieval_difficulties
+                )
+                if non_retrieval_count > 0:
+                    console.print(
+                        f"⚠️  Warning: {non_retrieval_count} scenarios are not in retrieval difficulties {retrieval_difficulties}"
+                    )
         
         # Apply total_instances limit from config
         total_instances = getattr(config.phase3, 'total_instances', len(filtered_scenarios))
