@@ -2824,6 +2824,7 @@ def run_evaluation(config: Config, models: Optional[List[str]] = None,
     async def _async_evaluation():
         # Load scenarios from Phase 3
         scenarios_dir = Path(config.data.output_dir) / "scenarios"
+        console.print(f"📁 Using directory: {scenarios_dir}")
         if not scenarios_dir.exists():
             raise FileNotFoundError("No scenarios found. Run Phase 3 first!")
         
@@ -2838,14 +2839,32 @@ def run_evaluation(config: Config, models: Optional[List[str]] = None,
         if not all_scenarios:
             raise ValueError("No scenarios found in scenario files!")
         
+        # Create a temporary evaluator instance to use its filtering methods
+        temp_evaluator = LoCoBenchEvaluator(config)
+        
+        # Convert difficulty to list if specified
+        difficulty_levels = [difficulty] if difficulty else None
+        
+        # Filter scenarios using the evaluator's method
+        filtered_scenarios = temp_evaluator._filter_scenarios(
+            all_scenarios, 
+            task_categories=categories,
+            difficulty_levels=difficulty_levels
+        )
+        
+        # Apply total_instances limit from config
+        total_instances = getattr(config.phase3, 'total_instances', len(filtered_scenarios))
+        if len(filtered_scenarios) > total_instances:
+            console.print(f"📦 Limiting scenarios from {len(filtered_scenarios)} to {total_instances} (phase3.total_instances)")
+            filtered_scenarios = filtered_scenarios[:total_instances]
+        else:
+            console.print(f"📦 Using {len(filtered_scenarios)} scenarios (phase3.total_instances = {total_instances})")
+        
         # Default models if none specified
         if not models:
             available_models = ['openai-o3', 'gemini-2.5-pro']
         else:
             available_models = list(models)
-        
-        # Convert difficulty to list if specified
-        difficulty_levels = [difficulty] if difficulty else None
         
         # For multiple models, evaluate each one separately with its own checkpoint
         all_results = {}
@@ -2858,7 +2877,7 @@ def run_evaluation(config: Config, models: Optional[List[str]] = None,
             
             # Evaluate this model
             model_results = await evaluator.evaluate_models(
-                [model_name], all_scenarios, categories, difficulty_levels, 
+                [model_name], filtered_scenarios, categories, difficulty_levels, 
                 max_concurrent_scenarios=max_concurrent_scenarios, resume=resume
             )
             
